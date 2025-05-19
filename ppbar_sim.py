@@ -22,16 +22,73 @@ PDG_ID = {2212: 0.9382720813,  # proton mass in GeV/c^2
 
 
 class EventGenerator:
-    def __init__(self, beam_energy, target_mass, num_events=1_000_000, smear_sigma=0.01):
-        self.num_events = num_events
-        self.c = 30  # cm/ns
-        self.beam_energy = beam_energy
-        self.target_mass = target_mass
-        self.p_beam = vec.obj(px=0, py=0, pz=beam_energy, E=beam_energy)
-        self.p_target = vec.obj(px=0, py=0, pz=0, E=target_mass)
-        self.smear = np.random.normal(1, smear_sigma, self.num_events)
+    def __init__(self, beam_energy=None, target_mass=None, num_events=None, smear_sigma=None, input_file=None):
+        """
+        Initialize the EventGenerator with beam energy, target mass, number of events, and smear sigma.
+        Parameters
+        ----------
+        beam_energy : float
+            Beam energy in GeV.
+        target_mass : float
+            Target mass in GeV.
+        num_events : int
+            Number of events to generate.
+        smear_sigma : float
+            Smearing sigma for the generated events.
+        input_file : str
+            Path to the input file containing parameters.
+        """ 
+        ### Need to add a check for the input file to see if it exists ###
+        ### Make sure to add a check on whether input parameters are valid ###
+
+        if input_file is None:
+            self.num_events = num_events
+            self.c = 30  # cm/ns
+            self.beam_energy = beam_energy
+            self.target_mass = target_mass
+            self.p_beam = vec.obj(px=0, py=0, pz=beam_energy, E=beam_energy) # type: ignore
+            self.p_target = vec.obj(px=0, py=0, pz=0, E=target_mass) # type: ignore
+            self.smear = np.random.normal(1, smear_sigma, self.num_events) # type: ignore
+        elif input_file is not None:
+            with open(input_file, "r") as f:
+                for line in f:
+                    if line.startswith("#"):
+                        continue
+                    key, value = [x.strip() for x in line.split("=")]
+                    if key == "beam_energy":
+                        self.beam_energy = float(value)
+                    elif key == "target_mass":
+                        self.target_mass = float(value)
+                    elif key == "num_events":
+                        self.num_events = int(value)
+                    elif key == "smear_sigma":
+                        self.smear_sigma = float(value)
+                    elif key == "t_slope":
+                        self.t_slope = float(value)
+                    else:
+                        raise ValueError(f"Unknown parameter: {key}")
+                    
+            self.p_beam = vec.obj(px=0, py=0, pz=self.beam_energy, E=self.beam_energy) # type: ignore
+            self.p_target = vec.obj(px=0, py=0, pz=0, E=self.target_mass) # type: ignore
+            self.smear = np.random.normal(1, self.smear_sigma, self.num_events)
 
     def momentum_magnitude(self, mass_system, mass1, mass2):
+        """
+        Calculate the momentum magntude for a two-body decay from a parent particle at rest.
+        Parameters
+        ---------- 
+        mass_system : float or np.ndarray
+            Mass of the system (parent particle).
+        mass1 : float or np.ndarray
+            Mass of the first daughter particle.
+        mass2 : float or np.ndarray
+            Mass of the second daughter particle.
+        Returns
+        -------
+        p_mag : float or np.ndarray
+            Momentum magnitude of the daughter particles in the parent rest frame.
+        """
+
         mass_system = np.array(mass_system)
         mask = mass_system >= (mass1 + mass2)
         if isinstance(mass1, np.ndarray):
@@ -45,71 +102,51 @@ class EventGenerator:
         p_mag[mask] = np.sqrt((mass_system[mask]**2 - (mass1 + mass2)**2) *
                               (mass_system[mask]**2 - (mass1 - mass2)**2)) / (2 * mass_system[mask])
         return p_mag
-
-    # def two_body_decay(self, parent, mass1, mass2, B = None, detector_mask=None):
-    #     if detector_mask is None:
-    #         detector_mask = np.ones(len(parent), dtype=bool)
-    #     smear_mask = self.smear[detector_mask]
-    #     p_mag = self.momentum_magnitude(parent.M, mass1, mass2) * smear_mask
-    #     cos_theta = np.random.uniform(-1, 1, len(p_mag))
-    #     theta = np.arccos(cos_theta)
-    #     phi = np.random.uniform(-np.pi, np.pi, len(p_mag))
-
-    #     p1 = vec.array({
-    #         'px': p_mag * np.sin(theta) * np.cos(phi),
-    #         'py': p_mag * np.sin(theta) * np.sin(phi),
-    #         'pz': p_mag * np.cos(theta),
-    #         'E': np.sqrt(p_mag**2 + mass1**2)
-    #     })    
-
-    #     if B is not None: 
-    #         parent = parent.boostCM_of(parent + p1)
-    #         p1 = p1.boostCM_of(parent + p1)
-
-    #         t_slope = np.random.uniform(0, 10, len(parent))
-    #         weight = np.exp(-t_slope / B)
-    #         prob = weight / np.sum(weight)
-    #         t_sample = np.random.choice(t_slope, size=len(parent), p=prob)
-    #         cos_theta = (t_sample - (parent.M2 + p1.M2 - 2 * (parent.E * p1.E))) / (2 * parent.mag * p1.mag)
-        
-    #     theta = np.arccos(cos_theta) 
-    #     p1 = vec.array({
-    #         'px': p_mag * np.sin(theta) * np.cos(phi),
-    #         'py': p_mag * np.sin(theta) * np.sin(phi),
-    #         'pz': p_mag * np.cos(theta),
-    #         'E': np.sqrt(p_mag**2 + mass1**2)
-    #     })
-    #     p2 = vec.array({
-    #         'px': -p1.px,
-    #         'py': -p1.py,
-    #         'pz': -p1.pz,
-    #         'E': np.sqrt(p_mag**2 + mass2**2)
-    #     })
-    #     return p1, p2
     
     def two_body_decay(self, parent, mass1, mass2, B=None, detector_mask=None):
+        """
+        Generate two-body decay of a parent particle into two daughter particles.
+        Parameters
+        ----------
+        parent : vec.array
+            4-momentum of the parent particle.
+        mass1 : float
+            Mass of the first daughter particle.
+        mass2 : float
+            Mass of the second daughter particle.
+        B : float, optional
+            T slope weighting parameter for the decay, determines the decay angular distribution in parent rest frame.
+            If None, uniform distribution is used.
+        detector_mask : np.ndarray, optional
+            Mask to apply to the parent particles. If None, all parent particles are considered.
+        Returns
+        -------
+        p1 : vec.array
+            4-momentum of the first daughter particle. ### Need to boost to lab frame
+        p2 : vec.array
+            4-momentum of the second daughter particle. ### Need to boost to lab frame
+        """
+
         if detector_mask is None:
             detector_mask = np.ones(len(parent), dtype=bool)
 
         parent = parent
-        smear_mask = self.smear[detector_mask]
         M = parent.M
-        p_mag = self.momentum_magnitude(M, mass1, mass2) * smear_mask
+        p_mag = self.momentum_magnitude(M, mass1, mass2)
         E1 = np.sqrt(p_mag**2 + mass1**2)
         C = M**2 + mass1**2 - 2 * M * E1
         N = len(parent)
 
         if B is not None:
-            # Sample t-values with exp(-t/B) weighting
-            t_candidates = np.random.uniform(0, 10, size=5 * N)  # broader pool
+            # Sample t-values with exp(-t*B) weighting
+            t_candidates = np.random.uniform(0, 10, size=N)  # broader pool
             weights = np.exp(-t_candidates * B)
             probs = weights / np.sum(weights)
             t_sampled = np.random.choice(t_candidates, size=N, replace=False, p=probs)
 
             # Compute cos(theta) from sampled t
-            cos_theta = (t_sampled - C) / (2 * p_mag**2)
-            # cos_theta = t_sampled / (2 * p_mag**2) - 1
-            cos_theta = np.clip(cos_theta, -1, 1)
+            cos_theta = t_sampled / (2 * p_mag**2) - 1
+            # cos_theta = np.clip(cos_theta, -1, 1)  # Ensure within valid range
         else:
             cos_theta = np.random.uniform(-1, 1, N)
 
@@ -148,45 +185,147 @@ class EventGenerator:
         else:
             return np.full_like(theta_deg, False, dtype=bool)
 
-    def generate_scattered_electron(self, Q2_range=(0, 6), W_range=(0.938, 6), det=None):
-        Q2 = np.random.uniform(*Q2_range, self.num_events)
-        W = np.random.uniform(*W_range, self.num_events)
-        E_transfer = (Q2 + W**2 - self.target_mass**2) / (2 * self.target_mass)
-        E_scattered = np.abs(self.beam_energy - E_transfer)
-        theta = np.arccos(1 - Q2 / (2 * self.beam_energy * E_scattered))
-        phi = np.random.uniform(-np.pi, np.pi, self.num_events)
+    # def generate_scattered_electron(self, Q2_range=(0, 6), E_range=(0, 6), W_min = 2, det=None):
+    #     Q2 = np.random.uniform(*Q2_range, self.num_events) # type: ignore
+    #     E_scattered = np.random.uniform(*E_range, self.num_events) # type: ignore
+    #     theta = np.arccos(1 - Q2 / (2 * self.beam_energy * E_scattered)) # type: ignore
+    #     phi = np.random.uniform(-np.pi, np.pi, self.num_events)
 
-        if det is None:
-            mask = np.full_like(theta, True, dtype=bool)
-        else:
-            mask = self.in_acceptance(np.degrees(theta), det=det)
+    #     if det is None:
+    #         mask = np.full_like(theta, True, dtype=bool)
+    #     else:
+    #         mask = self.in_acceptance(np.degrees(theta), det=det)
 
-        p_scattered = vec.array({
-            'px': E_scattered[mask] * np.sin(theta[mask]) * np.cos(phi[mask]),
-            'py': E_scattered[mask] * np.sin(theta[mask]) * np.sin(phi[mask]),
-            'pz': E_scattered[mask] * np.cos(theta[mask]),
-            'E': E_scattered[mask]
-        })
-        p_virtual = self.p_beam - p_scattered
-        p_W = self.p_beam + self.p_target - p_scattered
-        return p_scattered, p_virtual, p_W, mask
+    #     p_scattered = vec.array({
+    #         'px': E_scattered[mask] * np.sin(theta[mask]) * np.cos(phi[mask]),
+    #         'py': E_scattered[mask] * np.sin(theta[mask]) * np.sin(phi[mask]),
+    #         'pz': E_scattered[mask] * np.cos(theta[mask]),
+    #         'E': E_scattered[mask]
+    #     })
+    #     p_virtual = self.p_beam - p_scattered
+    #     p_W = self.p_beam + self.p_target - p_scattered # type: ignore
+    #     return p_scattered, p_virtual, p_W, mask
     
+    def generate_scattered_electron( self, Q2_range=(0, 6), E_range=(0, 6), det=None, W_min=4.0):
+        """
+        Generate scattered electron 4-momenta.
+        Parameters
+        ----------
+        Q2_range : tuple
+            Range of Q2 values (in GeV^2) to sample from.
+        E_range : tuple
+            Range of scattered electron energies (in GeV) to sample from.
+        det : str or None   
+            Detector type for acceptance cuts. Options are "eFT" or "eFD".
+            If None, no acceptance cuts are applied.
+        W_min : float
+            Minimum W value (in GeV) for the generated events.
+        Returns
+        -------
+        p_scattered : vec.array
+            4-momenta of the scattered electrons.
+        p_virtual : vec.array
+            4-momenta of the virtual photon.
+        p_W : vec.array
+            4-momenta of the W boson.
+        """
+
+        p_scattered_all = []
+        p_virtual_all = []
+        p_W_all = []
+        num_events = self.num_events
+        batch_size = max(4 * num_events, 10000)
+
+        while sum(len(v) for v in p_scattered_all) < num_events:
+            Q2 = np.random.uniform(*Q2_range, batch_size)
+            E_scattered = np.random.uniform(*E_range, batch_size)
+            theta = np.arccos(1 - Q2 / (2 * self.beam_energy * E_scattered))
+            phi = np.random.uniform(-np.pi, np.pi, batch_size)
+
+            px = E_scattered * np.sin(theta) * np.cos(phi)
+            py = E_scattered * np.sin(theta) * np.sin(phi)
+            pz = E_scattered * np.cos(theta)
+
+            p_scattered = vec.array({
+                'px': px,
+                'py': py,
+                'pz': pz,
+                'E': E_scattered
+            })
+
+            p_virtual = self.p_beam - p_scattered
+            p_W = self.p_beam + self.p_target - p_scattered
+
+            W = p_W.mass
+
+            if det is None:
+                det_mask = np.full(batch_size, True, dtype=bool)
+            else:
+                det_mask = self.in_acceptance(np.degrees(theta), det=det)
+
+            good_mask = (W >= W_min) & det_mask
+
+            p_scattered_all.append(p_scattered[good_mask])
+            p_virtual_all.append(p_virtual[good_mask])
+            p_W_all.append(p_W[good_mask])
+
+        def stack(vec_list):
+            return vec.array({
+                'px': np.concatenate([v.px for v in vec_list])[:num_events],
+                'py': np.concatenate([v.py for v in vec_list])[:num_events],
+                'pz': np.concatenate([v.pz for v in vec_list])[:num_events],
+                'E':  np.concatenate([v.E  for v in vec_list])[:num_events],
+            })
+
+        return stack(p_scattered_all), stack(p_virtual_all), stack(p_W_all)
     
+    def write_LUND(self, particles: list, filename: str):
+        """
+        Write particles to a LUND file.
+
+        Parameters
+        ----------
+        particles : list
+            List of dictionaries containing particle information.
+            Each dictionary should have the following keys:
+                - 'vec': 4-momentum vector of the particle (vec.array)
+                - 'pid': Particle ID (int)
+                - 'charge': Charge of the particle (int)
+                - 'mass': Mass of the particle (float)
+                - 'vx', 'vy', 'vz': Vertex coordinates (float)
+        filename : str
+            Name of the output LUND file.
+        """
+
+        with open(filename, "w") as f:
+            for i in range(len(p_scattered) - 1):
+                # Write event header: number of particles, target/beam info (fill with dummy if unknown)
+                num_particles = len(particles)
+                f.write(f"\t{num_particles} 0 0 0 0 0 0\n")  # simple header
+
+                # Write each particle
+                for j, p in enumerate(particles, 1):
+                    charge3 = int(p['charge'])
+                    f.write(f"{j} {charge3} {p['pid']} 1 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
+                            f"{p['vec'][i].E:.6f} {p['mass']:.6f} {p['vx']:.6f} {p['vy']:.6f} {p['vz']:.6f} 0.0\n")
+
 
 #%%
 
-EG = EventGenerator(beam_energy=10.2, target_mass=PDG_ID[2212], num_events=1_000_000, smear_sigma=0)
-p_scattered, p_virtual, p_W, detector_mask = EG.generate_scattered_electron(det=None)
-
-p_p1, p_X = EG.two_body_decay(p_W, PDG_ID[2212], 3, B = None, detector_mask=detector_mask)
-p_X_RF = p_X.boostCM_of(p_X)
-p_p2, p_pbar = EG.two_body_decay(p_X_RF, PDG_ID[2212], PDG_ID[2212], B = None, detector_mask=detector_mask)
+# EG = EventGenerator(beam_energy=10.2, target_mass=PDG_ID[2212], num_events=1_000_000, smear_sigma=0)
+EG = EventGenerator(input_file='../Simulations/ep_generator/input.txt')
+p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min = 3*PDG_ID[2212]+.2, det=None)
+p_p1, p_X = EG.two_body_decay(p_W, PDG_ID[2212], np.random.normal(2.105, 0., EG.num_events), B = None, detector_mask=None)
+p_X_RF = p_X.boostCM_of(p_X) 
+p_p2, p_pbar = EG.two_body_decay(p_X, PDG_ID[2212], PDG_ID[2212], B = None, detector_mask=None)
+#%%
 # Boost the particles to the lab frame
 p_p1 = p_p1[~np.isnan(p_X.M)]
 p_p2 = p_p2[~np.isnan(p_X.M)]
 p_pbar = p_pbar[~np.isnan(p_X.M)]
 p_virtual = p_virtual[~np.isnan(p_X.M)]
 p_scattered = p_scattered[~np.isnan(p_X.M)]
+p_W = p_W[~np.isnan(p_X.M)]
 p_X = p_X[~np.isnan(p_X.M)]
 
 p_X_LF = p_X.boost((p_virtual + EG.p_target).to_beta3())
@@ -195,10 +334,10 @@ p_p2_LF = p_p2.boost((p_X_LF).to_beta3())
 p_pbar_LF = p_pbar.boost((p_X_LF).to_beta3())
 
 fig, ax = hists.plt.subplots()
-h_XM = hists.histo(p_X_LF.M, bins = 100, range = (2., 4), color = 'white', ax = ax)
+h_XM = hists.histo(p_X_LF.M, bins = 100, range = (2., 3), color = 'white', ax = ax)
 h_XM.plot_exp(color = 'black', fmt = '.', label=r'Generated X', ax = ax)
-h_p2pbarM = hists.histo((p_p2_LF + p_pbar_LF).M, bins = 100, range = (2., 4), color = 'red', alpha = .5, label = r'$p_{M}\bar{p}$ Mass', ax = ax)
-
+h_p2pbarM = hists.histo((p_p2_LF + p_pbar_LF).M, bins = 100, range = (2., 3), color = 'red', alpha = .5, label = r'$p_{M}\bar{p}$ Mass', ax = ax)
+#%%
 fig, ax = hists.plt.subplots()
 # hists.histo(np.cos(p_X.theta), bins = 100, range = (0, np.pi), label=r'Generated X')
 hists.histo(np.cos(p_p2.theta), bins = 100, range = (-1, 1), label = r'$\cos\theta_{p_{XRF}}$', ax = ax)
@@ -222,58 +361,6 @@ t_prime = EG.p_target - p_p1_LF
 fig, ax = plt.subplots()
 hists.histo(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)', ax = ax)
 hists.histo(-t_prime.M2, bins=100, histtype = 'step', label=r't-Channel ($p_{target}p_{1}}$)', ax = ax)
-
-import scipy.optimize as opt
-
-def exp_func(t, A, B):
-    return A * np.exp(-t / B)
-
-hist, bins = np.histogram(-t.M2, bins=100, range=(0, 3))
-bin_centers = 0.5 * (bins[1:] + bins[:-1])
-
-popt, _ = opt.curve_fit(exp_func, bin_centers[bin_centers > 1], hist[bin_centers > 1], p0=[1e4, 1.0])
-A_fit, B_fit = popt
-
-plt.figure()
-plt.plot(bin_centers, hist, label="Data")
-plt.plot(bin_centers, exp_func(bin_centers, *popt), label=f"Fit: B={B_fit:.2f}")
-plt.yscale("log")
-plt.legend()
-
-
-
-
-#%%
-fig, ax = plt.subplots()
-hists.histo(p_p2.phi, bins = 100, range = (-np.pi, np.pi), ax=ax)
-hists.histo(p_pbar.phi, bins = 100, range = (-np.pi, np.pi), ax=ax, histtype='step')
-
-fig, ax = plt.subplots()
-hists.histo(np.cos(p_p2.theta), bins = 100, ax = ax)
-hists.histo(np.cos(p_pbar.theta), bins = 100, ax = ax, histtype='step')
-#%%
-hists.histo((p_p2_LF + p_pbar_LF).M, bins=100, range=(1.5, 3))
-
-# %%
-# EG = EventGenerator(beam_energy=10.2, target_mass=PDG_ID[2212], num_events=1000000, smear_sigma=0.1)
-# p_scattered, p_virtual, p_W, detector_mask = EG.generate_scattered_electron(det="eFT")
-
-# p_p1, p_X0 = EG.two_body_decay(p_W, PDG_ID[2212], np.random.normal(2.5, 0.2, EG.num_events)[detector_mask], detector_mask)
-# p_pim, p_X = EG.two_body_decay(p_X0, PDG_ID[211], np.random.normal(2.0, 0.2, EG.num_events)[detector_mask], detector_mask)
-# p_p2, p_nbar = EG.two_body_decay(p_X, PDG_ID[2212], PDG_ID[2112], detector_mask)
-# # Boost the particles to the lab frame
-# p_p1 = p_p1[~np.isnan(p_X.M)]
-# p_p2 = p_p2[~np.isnan(p_X.M)]
-# p_nbar = p_nbar[~np.isnan(p_X.M)]
-# p_virtual = p_virtual[~np.isnan(p_X.M)]
-# p_scattered = p_scattered[~np.isnan(p_X.M)]
-# p_X = p_X[~np.isnan(p_X.M)]
-
-
-# p_X_LF = p_X.boost((p_virtual + EG.p_target).to_beta3())
-# p_p1_LF = p_p1.boost((p_virtual + EG.p_target).to_beta3())
-# p_p2_LF = p_p2.boost((p_X_LF).to_beta3())
-# p_nbar_LF = p_nbar.boost((p_X_LF).to_beta3())
 # %%
 particles = [
     {'vec': p_p2_LF, 'pid': 2212, 'charge': 1, 'mass': PDG_ID[2212], 'vx': 0, 'vy': 0, 'vz': 0},
@@ -281,16 +368,4 @@ particles = [
     {'vec': p_p1_LF, 'pid': 2212, 'charge': 1, 'mass': PDG_ID[2212], 'vx': 0, 'vy': 0, 'vz': 0},
     {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
 ]
-
-with open("output.dat", "w") as f:
-    for i in range(len(p_scattered) - 1):
-        # Write event header: number of particles, target/beam info (fill with dummy if unknown)
-        num_particles = len(particles)
-        f.write(f"\t{num_particles} 0 0 0 0 0 0\n")  # simple header
-
-        # Write each particle
-        for j, p in enumerate(particles, 1):
-            charge3 = int(p['charge'])
-            f.write(f"{j} {charge3} {p['pid']} 1 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
-                    f"{p['vec'][i].E:.6f} {p['mass']:.6f} {p['vx']:.6f} {p['vy']:.6f} {p['vz']:.6f} 0.0\n")
 # %%
