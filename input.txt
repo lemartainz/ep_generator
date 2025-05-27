@@ -1,5 +1,5 @@
 # This is the beginning of adding in an input file for the event generator class
-num_events=10_000
+num_events=1_000_000
 beam_energy=10.2
 smear_sigma=0.0
 target_mass=0.938

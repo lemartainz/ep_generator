@@ -20,6 +20,12 @@ PDG_ID = {2212: 0.9382720813,  # proton mass in GeV/c^2
           -211: 0.13957039,    # anti-pion mass in GeV/c^2
           3312: 1.321}        # Lambda mass in GeV/c^2
 
+def plot_exp(hist, **kwargs):
+    bin_centers = (hist[1][:-1] +
+                       hist[1][1:]) / 2
+    
+    plt.errorbar(
+        bin_centers, hist[0], yerr=np.sqrt(hist[0]), **kwargs)
 
 class EventGenerator:
     def __init__(self, beam_energy=None, target_mass=None, num_events=None, smear_sigma=None, input_file=None):
@@ -315,7 +321,7 @@ class EventGenerator:
 # EG = EventGenerator(beam_energy=10.2, target_mass=PDG_ID[2212], num_events=1_000_000, smear_sigma=0)
 EG = EventGenerator(input_file='../Simulations/ep_generator/input.txt')
 p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min = 3*PDG_ID[2212]+.2, det=None)
-p_p1, p_X = EG.two_body_decay(p_W, PDG_ID[2212], np.random.normal(2.105, 0., EG.num_events), B = None, detector_mask=None)
+p_p1, p_X = EG.two_body_decay(p_W, PDG_ID[2212], np.random.normal(2.105, 0., EG.num_events), B = 1, detector_mask=None)
 p_X_RF = p_X.boostCM_of(p_X) 
 p_p2, p_pbar = EG.two_body_decay(p_X, PDG_ID[2212], PDG_ID[2212], B = None, detector_mask=None)
 #%%
@@ -333,34 +339,31 @@ p_p1_LF = p_p1.boost((p_virtual + EG.p_target).to_beta3())
 p_p2_LF = p_p2.boost((p_X_LF).to_beta3())
 p_pbar_LF = p_pbar.boost((p_X_LF).to_beta3())
 
-fig, ax = hists.plt.subplots()
-h_XM = hists.histo(p_X_LF.M, bins = 100, range = (2., 3), color = 'white', ax = ax)
-h_XM.plot_exp(color = 'black', fmt = '.', label=r'Generated X', ax = ax)
-h_p2pbarM = hists.histo((p_p2_LF + p_pbar_LF).M, bins = 100, range = (2., 3), color = 'red', alpha = .5, label = r'$p_{M}\bar{p}$ Mass', ax = ax)
+fig, ax = plt.subplots()
+h_XM = plt.hist(p_X_LF.M, bins = 100, range = (2., 3), )
+plot_exp(h_XM, color = 'black', fmt = '.', label=r'Generated X')
+h_p2pbarM = plt.hist((p_p2_LF + p_pbar_LF).M, bins = 100, range = (2., 3), color = 'red', alpha = .5, label = r'$p_{M}\bar{p}$ Mass')
 #%%
-fig, ax = hists.plt.subplots()
-# hists.histo(np.cos(p_X.theta), bins = 100, range = (0, np.pi), label=r'Generated X')
-hists.histo(np.cos(p_p2.theta), bins = 100, range = (-1, 1), label = r'$\cos\theta_{p_{XRF}}$', ax = ax)
-hists.histo(-np.cos(p_pbar.theta), bins = 100, range = (-1, 1), histtype = 'step', label = r'$-\cos\theta_{\bar{p}_{XRF}}$', ax = ax)
+fig, ax = plt.subplots()
+# plt.hist(np.cos(p_X.theta), bins = 100, range = (0, np.pi), label=r'Generated X')
+plt.hist(np.cos(p_p2.theta), bins = 100, range = (-1, 1), label = r'$\cos\theta_{p_{XRF}}$')
+plt.hist(-np.cos(p_pbar.theta), bins = 100, range = (-1, 1), histtype = 'step', label = r'$-\cos\theta_{\bar{p}_{XRF}}$')
 
-fig, ax = hists.plt.subplots()
-# hists.histo(np.cos(p_X.theta), bins = 100, range = (0, np.pi), label=r'Generated X')
-hists.histo((p_p2.phi), bins = 100, range = (-np.pi, np.pi), label = r'$\phi_{p_{XRF}}$', ax = ax)
-hists.histo((p_pbar.phi), bins = 100, range = (-np.pi, np.pi), histtype = 'step', label = r'$\phi_{\bar{p}_{XRF}}$', ax = ax)
+fig, ax = plt.subplots()
+# plt.hist(np.cos(p_X.theta), bins = 100, range = (0, np.pi), label=r'Generated X')
+plt.hist((p_p2.phi), bins = 100, range = (-np.pi, np.pi), label = r'$\phi_{p_{XRF}}$')
+plt.hist((p_pbar.phi), bins = 100, range = (-np.pi, np.pi), histtype = 'step', label = r'$\phi_{\bar{p}_{XRF}}$')
 
-fig, ax = hists.plt.subplots()
-# hists.histo(np.cos(p_X.theta), bins = 100, range = (0, np.pi), label=r'Generated X')
-hists.histo(np.cos(p_X.theta), bins = 100, range = (-1, 1), label = r'$\cos\theta_{p_{XRF}}$', ax = ax)
-hists.histo(-np.cos(p_p1.theta), bins = 100, range = (-1, 1), histtype = 'step', label = r'$-\cos\theta_{\bar{p}_{XRF}}$', ax = ax)
+fig, ax = plt.subplots()
+# plt.hist(np.cos(p_X.theta), bins = 100, range = (0, np.pi), label=r'Generated X')
+plt.hist(np.cos(p_X.theta), bins = 100, range = (-1, 1), label = r'$\cos\theta_{p_{XRF}}$')
+plt.hist(-np.cos(p_p1.theta), bins = 100, range = (-1, 1), histtype = 'step', label = r'$-\cos\theta_{\bar{p}_{XRF}}$')
 #%%
-# p_miss = EG.p_beam + EG.p_target - p_scattered - p_p1_LF - p_p2_LF
-# hists.histo(p_miss.M, bins=100, range=(0, 2), alpha=0.7, label='Missing Mass')
-
 t = p_virtual - p_X_LF
 t_prime = EG.p_target - p_p1_LF
 fig, ax = plt.subplots()
-hists.histo(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)', ax = ax)
-hists.histo(-t_prime.M2, bins=100, histtype = 'step', label=r't-Channel ($p_{target}p_{1}}$)', ax = ax)
+plt.hist(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)')
+plt.hist(-t_prime.M2, bins=100, histtype = 'step', label=r't-Channel ($p_{target}p_{1}}$)')
 # %%
 particles = [
     {'vec': p_p2_LF, 'pid': 2212, 'charge': 1, 'mass': PDG_ID[2212], 'vx': 0, 'vy': 0, 'vz': 0},
@@ -368,4 +371,6 @@ particles = [
     {'vec': p_p1_LF, 'pid': 2212, 'charge': 1, 'mass': PDG_ID[2212], 'vx': 0, 'vy': 0, 'vz': 0},
     {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
 ]
+# %%
+EG.write_LUND(particles, "test.lund")
 # %%
