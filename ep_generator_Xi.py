@@ -296,8 +296,10 @@ class EventGenerator:
                 # Write each particle
                 for j, p in enumerate(particles, 1):
                     charge3 = int(p['charge'])
+                    type = 1.0 #GEMC only accepts type 1 for particles
+                    lifetime = 0.0 # placeholder for lifetime
                     vz = random.uniform(-10, 2)  # Random vertex z-coordinate for each particle
-                    f.write(f"{j} {charge3} {p['pid']} 1 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
+                    f.write(f"{j} {lifetime:.1f} {type:.1f} {p['pid']} 1 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
                             f"{p['vec'][i].E:.6f} {p['mass']:.6f} {p['vx']:.6f} {p['vy']:.6f} {vz:.6f}\n")
 # def write_LUND(self, particles: list, filename: str):
 #     """
@@ -430,6 +432,6 @@ particles = [
     {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
 ]
 # %%
-EG.write_LUND(particles, "testNewHeader2.lund")
+EG.write_LUND(particles, "test.lund")
 
 #%%
