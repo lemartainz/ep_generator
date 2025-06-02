@@ -298,8 +298,10 @@ class EventGenerator:
                     charge3 = int(p['charge'])
                     type = 1.0 #GEMC only accepts type 1 for particles
                     lifetime = 0.0 # placeholder for lifetime
-                    vz = random.uniform(-10, 2)  # Random vertex z-coordinate for each particle
-                    f.write(f"{j} {lifetime:.1f} {type:.1f} {p['pid']} 1 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
+                    vz = random.uniform(-10, 2)  # Random vertex z-coordinate for each particle; placeholder for vertex z-coordinate; GEMC corrects this when reconstructed
+                    #vz = 0.0 # placeholder for vertex z-coordinate
+                    #vz = -3.0 # placeholder for vertex z-coordinate; GEMC corrects this when reconstructed
+                    f.write(f"{j} {lifetime:.1f} {type:.1f} {p['pid']} 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
                             f"{p['vec'][i].E:.6f} {p['mass']:.6f} {p['vx']:.6f} {p['vy']:.6f} {vz:.6f}\n")
 # def write_LUND(self, particles: list, filename: str):
 #     """
@@ -321,7 +323,7 @@ class EventGenerator:
 
 # #%%
 
-EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=1_000, smear_sigma=0)
+EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=10_000, smear_sigma=0)
 
 
 
@@ -427,11 +429,11 @@ plt.show()
 # %%
 particles = [
     {'vec': p_Kb_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
-    {'vec': p_Xi_LF, 'pid': -3312, 'charge': -1, 'mass': PDG_ID[3312], 'vx': 0, 'vy': 0, 'vz': 0},
+    {'vec': p_Xi_LF, 'pid': 3312, 'charge': -1, 'mass': PDG_ID[3312], 'vx': 0, 'vy': 0, 'vz': 0},
     {'vec': p_Km_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
     {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
 ]
 # %%
-EG.write_LUND(particles, "test.lund")
+EG.write_LUND(particles, "ep10K_.lund")
 
 #%%
