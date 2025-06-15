@@ -323,7 +323,7 @@ class EventGenerator:
 
 # #%%
 
-EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=10_000, smear_sigma=0)
+EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=5_000, smear_sigma=0)
 
 
 
@@ -394,10 +394,15 @@ plt.show()
 
 
 
+fig, ax = plt.subplots()
+ax.hist(p_scattered.theta*180/np.pi, bins=100, range=(0,5), label=r'$theta_{e}$')
+ax.set_ylabel('Counts')
+plt.show()
+
 p_miss = EG.p_beam + EG.p_target - p_scattered - p_Km_LF - p_Kb_LF
 # Plot 5: Missing Mass
 fig, ax = plt.subplots()
-ax.hist(p_miss.M, bins=100, range=(0, 2), alpha=0.7, label='Missing Mass')
+ax.hist(p_miss.M, bins=100, range=(1.25, 1.45), alpha=0.7, label='Missing Mass')
 ax.set_xlabel('Missing Mass (GeV/c²)')
 ax.set_ylabel('Counts')
 plt.show()
@@ -426,6 +431,8 @@ ax.set_ylabel('Counts')
 ax.legend()
 
 plt.show()
+
+
 # %%
 particles = [
     {'vec': p_Kb_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
@@ -434,6 +441,48 @@ particles = [
     {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
 ]
 # %%
-EG.write_LUND(particles, "ep10K_.lund")
+EG.write_LUND(particles, "ep5K_FT.lund")
 
 #%%
+
+
+
+
+
+
+
+
+######### to produce multiple lund files to submit to OSG, include this part of the code below #############
+
+import os
+
+# Set up generator parameters
+num_files = 5000
+events_per_file = 5000
+output_dir = "lund_output"
+os.makedirs(output_dir, exist_ok=True)
+
+for i in range(num_files):
+    print(f"Generating file {i+1}/{num_files}")
+
+    EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=events_per_file, smear_sigma=0)
+
+    p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min=3.0, det=None)
+
+    # Use your preferred mass distribution here
+    p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.laplace(2.5, 0., len(p_W)), B=None)
+    p_X_RF = p_X.boostCM_of(p_X) 
+    p_Kb, p_Xi = EG.two_body_decay(p_X, PDG_ID[321], PDG_ID[3312], B=None)
+
+    # Assemble all final state particles
+    # Modify this depending on which particles you want in the final event
+    particles = [
+        {'pid': 11, 'vec': p_scattered, 'mass': 0.000511, 'vx': 0, 'vy': 0, 'charge': -1},
+        {'pid': 321, 'vec': p_Km,       'mass': 0.4937,  'vx': 0, 'vy': 0, 'charge': +1},
+        {'pid': 321, 'vec': p_Kb,       'mass': 0.4937,  'vx': 0, 'vy': 0, 'charge': +1},
+        {'pid': 3312, 'vec': p_Xi,      'mass': 1.3217,  'vx': 0, 'vy': 0, 'charge': -1},
+    ]
+
+    filename = f"{output_dir}/event_{i:04d}.lund"
+    EG.write_LUND(particles, filename)
+
