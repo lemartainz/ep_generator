@@ -1,0 +1,1 @@
+This is a lightweight electron-proton scattering event generator written in Python. This tool simplicity allows the user to modify the reaction as needed in terms of reactions, multiple decays, and a configurable host of kinematic variables such as $Q^2$, $W$, $P$, $\cos(\theta)$, Bjorken-x, among others.
