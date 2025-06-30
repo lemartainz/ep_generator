@@ -195,7 +195,7 @@ class EventGenerator:
 
 
     #def generate_scattered_electron( self, Q2_range=(0, 6), E_range=(0, 6), det=None, W_min=4.0):
-    def generate_scattered_electron( self, Q2_range=(0, 4), E_range=(0, 6), det=None, W_min=1.5):
+    def generate_scattered_electron( self, Q2_range=(0, 4), E_range=(0, 6.5), det=None, W_min=1.5):
         """
         Generate scattered electron 4-momenta.
         Parameters
@@ -303,53 +303,68 @@ class EventGenerator:
                     #vz = -3.0 # placeholder for vertex z-coordinate; GEMC corrects this when reconstructed
                     f.write(f"{j} {lifetime:.1f} {type:.1f} {p['pid']} 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
                             f"{p['vec'][i].E:.6f} {p['mass']:.6f} {p['vx']:.6f} {p['vy']:.6f} {vz:.6f}\n")
-# def write_LUND(self, particles: list, filename: str):
-#     """
-#     Write particles to a LUND file with randomized vz for each event.
-#     """
-#     with open(filename, "w") as f:
-#         num_events = len(particles[0]['vec'])  # Number of events
-#         num_particles = len(particles)         # Particles per event
 
-#         for i in range(num_events):
-#             vz = random.uniform(-10, 2)  # Random vz for this event
-#             f.write(f"\t{num_particles} 1 1 0 0 11 6.5 2212 0.938272 0\n")  # event header
-
-#             for j, p in enumerate(particles, 1):
-#                 charge3 = int(p['charge'])
-#                 f.write(f"{j} {charge3} {p['pid']} 1 0 0 {p['vec'][i].px:.6f} {p['vec'][i].py:.6f} {p['vec'][i].pz:.6f} "
-#                         f"{p['vec'][i].E:.6f} {p['mass']:.6f} 0.000000 0.000000 {vz:.6f}\n")
-
-
-# #%%
-
-EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=5_000, smear_sigma=0)
-
-
-
-#EG = EventGenerator(input_file='/Users/biancagualtieri/Desktop/researchSpring25/simulations/input.txt')
-p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min = 3.0, det=None)
-#p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.normal(2.5, 0., EG.num_events), B = None, detector_mask=None)
-#mass2_vals = breit_wigner(mean=2.0, width=0.2, size=len(p_W))
-p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.laplace(2.5, 0., len(p_W)) , B = None, detector_mask=None)
-
-
-p_X_RF = p_X.boostCM_of(p_X) 
-p_Kb, p_Xi = EG.two_body_decay(p_X, PDG_ID[321], PDG_ID[3312], B = None, detector_mask=None)
 #%%
-# Boost the particles to the lab frame
-p_Km = p_Km[~np.isnan(p_X.M)]
-p_Kb = p_Kb[~np.isnan(p_X.M)]
-p_Xi = p_Xi[~np.isnan(p_X.M)]
-p_virtual = p_virtual[~np.isnan(p_X.M)]
-p_scattered = p_scattered[~np.isnan(p_X.M)]
-p_W = p_W[~np.isnan(p_X.M)]
-p_X = p_X[~np.isnan(p_X.M)]
 
-p_X_LF = p_X.boost((p_virtual + EG.p_target).to_beta3())
-p_Km_LF = p_Km.boost((p_virtual + EG.p_target).to_beta3())
-p_Kb_LF = p_Kb.boost((p_X_LF).to_beta3())
-p_Xi_LF = p_Xi.boost((p_X_LF).to_beta3())
+
+
+import os
+import numpy as np
+
+# from your_breit_wigner import breit_wigner  # if you need it
+
+# Set up generator parameters
+num_files = 1
+events_per_file = 100000
+output_dir = "/Users/biancagualtieri/Desktop/researchSpring25/simulations/testLund_"
+os.makedirs(output_dir, exist_ok=True)
+
+for i in range(num_files):
+    print(f"Generating file {i+1}/{num_files}")
+
+    # Initialize generator for this file
+    EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=events_per_file, smear_sigma=0)
+
+    # Generate particles
+    p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min=3.0, det=None)
+    #p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.laplace(2.5, 0., len(p_W)), B=None, detector_mask=None)
+    p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.laplace(2.5, 0., len(p_W)), B=None)
+
+    p_X_RF = p_X.boostCM_of(p_X)
+    p_Kb, p_Xi = EG.two_body_decay(p_X, PDG_ID[321], PDG_ID[3312], B=None, detector_mask=None)
+    #p_Kb, p_Xi = EG.two_body_decay(p_X, PDG_ID[321], np.random.laplace(1.32,0.02,len(p_W)) , B=None, detector_mask=None)
+
+
+    # Remove NaNs
+    mask = ~np.isnan(p_X.M)
+    p_Km = p_Km[mask]
+    p_Kb = p_Kb[mask]
+    p_Xi = p_Xi[mask]
+    p_virtual = p_virtual[mask]
+    p_scattered = p_scattered[mask]
+    p_W = p_W[mask]
+    p_X = p_X[mask]
+
+    # Boost to lab frame
+    p_X_LF = p_X.boost((p_virtual + EG.p_target).to_beta3())
+    p_Km_LF = p_Km.boost((p_virtual + EG.p_target).to_beta3())
+    p_Kb_LF = p_Kb.boost((p_X_LF).to_beta3())
+    p_Xi_LF = p_Xi.boost((p_X_LF).to_beta3())
+
+
+    
+
+    # Prepare particles for LUND output
+    particles = [
+        {'vec': p_Kb_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
+        {'vec': p_Xi_LF, 'pid': 3312, 'charge': -1, 'mass': PDG_ID[3312], 'vx': 0, 'vy': 0, 'vz': 0},
+        {'vec': p_Km_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
+        {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
+    ]
+
+    # Write LUND file
+    filename = f"{output_dir}/event_{i:04d}.lund"
+    EG.write_LUND(particles, filename)
 
 
 #Plot 1: Invariant mass of X and Kb+Xi
@@ -406,24 +421,26 @@ ax.hist(p_miss.M, bins=100, range=(1.25, 1.45), alpha=0.7, label='Missing Mass')
 ax.set_xlabel('Missing Mass (GeV/c²)')
 ax.set_ylabel('Counts')
 plt.show()
-# hists.histo(p_miss.M, bins=100, range=(0, 2), alpha=0.7, label='Missing Mass')
+ax.hist(p_miss.M, bins=100, range=(0, 2), alpha=0.7, label='Missing Mass')
 
 #t = p_virtual - p_X_LF
-t = p_virtual - p_Km_LF
+#t =p_virtual - p_Km_LF
+t =p_virtual - p_Km_LF
 t_prime = EG.p_target - p_X_LF
-fig, ax = plt.subplots()
+#t_prime = EG.p_target - p_X_LF
+# fig, ax = plt.subplots()
 
 
-#hists.histo(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)', ax = ax)
+# hists.histo(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)', ax = ax)
 # hists.histo(-t_prime.M2, bins=100, histtype = 'step', label=r't-Channel ($p_{target}p_{1}}$)', ax = ax)
 
 fig, ax = plt.subplots()
 
 # Histogram for -t.M2
-ax.hist(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)', alpha=0.7)
+ax.hist(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}K^{+}_{m}$)', alpha=0.7)
 
 # Step-style histogram for -t_prime.M2
-ax.hist(-t_prime.M2, bins=100, histtype='step', label=r't-Channel ($p_{target}}p_X)')
+ax.hist(-t_prime.M2, bins=100, histtype='step', label=r't-Channel ($p_{target}}p_X$)')
 
 # Add labels and legend
 ax.set_xlabel(r'$-t$ [GeV$^2$]')
@@ -431,58 +448,4 @@ ax.set_ylabel('Counts')
 ax.legend()
 
 plt.show()
-
-
-# %%
-particles = [
-    {'vec': p_Kb_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
-    {'vec': p_Xi_LF, 'pid': 3312, 'charge': -1, 'mass': PDG_ID[3312], 'vx': 0, 'vy': 0, 'vz': 0},
-    {'vec': p_Km_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
-    {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
-]
-# %%
-EG.write_LUND(particles, "ep5K_FT.lund")
-
-#%%
-
-
-
-
-
-
-
-
-######### to produce multiple lund files to submit to OSG, include this part of the code below #############
-
-import os
-
-# Set up generator parameters
-num_files = 5000
-events_per_file = 5000
-output_dir = "lund_output"
-os.makedirs(output_dir, exist_ok=True)
-
-for i in range(num_files):
-    print(f"Generating file {i+1}/{num_files}")
-
-    EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=events_per_file, smear_sigma=0)
-
-    p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min=3.0, det=None)
-
-    # Use your preferred mass distribution here
-    p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.laplace(2.5, 0., len(p_W)), B=None)
-    p_X_RF = p_X.boostCM_of(p_X) 
-    p_Kb, p_Xi = EG.two_body_decay(p_X, PDG_ID[321], PDG_ID[3312], B=None)
-
-    # Assemble all final state particles
-    # Modify this depending on which particles you want in the final event
-    particles = [
-        {'pid': 11, 'vec': p_scattered, 'mass': 0.000511, 'vx': 0, 'vy': 0, 'charge': -1},
-        {'pid': 321, 'vec': p_Km,       'mass': 0.4937,  'vx': 0, 'vy': 0, 'charge': +1},
-        {'pid': 321, 'vec': p_Kb,       'mass': 0.4937,  'vx': 0, 'vy': 0, 'charge': +1},
-        {'pid': 3312, 'vec': p_Xi,      'mass': 1.3217,  'vx': 0, 'vy': 0, 'charge': -1},
-    ]
-
-    filename = f"{output_dir}/event_{i:04d}.lund"
-    EG.write_LUND(particles, filename)
 
