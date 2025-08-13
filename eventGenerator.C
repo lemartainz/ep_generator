@@ -52,12 +52,121 @@ double invariantSquare(const TLorentzVector &a, const TLorentzVector &b) {
 TH1D *h_tprime = new TH1D("h_tprime", "t' distribution; t' (GeV^{2}); Events", 100, -1, 2.0); 
 // The last parameter (2.0) is just an example max range; adjust depending on your kinematics.
 
-pair<TLorentzVector,TLorentzVector> twoBodyDecayWeighted(const TLorentzVector &parent_lab,
-                                                         double m1, double m2,
-                                                         double B,
-                                                         const TLorentzVector &p_virtual_lab,
-                                                         TRandom3 &rnd,
-                                                         int nCandidates = 10000) {
+// pair<TLorentzVector,TLorentzVector> twoBodyDecayWeighted(const TLorentzVector &parent_lab,
+//                                                          double m1, double m2,
+//                                                          double B,
+//                                                          const TLorentzVector &p_virtual_lab,
+//                                                          TRandom3 &rnd,
+//                                                          int nCandidates = 10000) {
+//     double M = parent_lab.M();
+//     if (M <= m1 + m2) {
+//         TLorentzVector nanv(0,0,0,0);
+//         return make_pair(nanv, nanv);
+//     }
+
+//     double p_mag = twoBodyMomentum(M, m1, m2);
+//     if (!isfinite(p_mag)) {
+//         TLorentzVector nanv(0,0,0,0);
+//         return make_pair(nanv, nanv);
+//     }
+
+//     // Calculate t at cosTheta = ±1
+//     TLorentzVector d1_rest_plus = [&]() {
+//         double cosTheta = +1.0;
+//         double sinTheta = sqrt(max(0.0, 1.0 - cosTheta*cosTheta));
+//         TLorentzVector v;
+//         v.SetPxPyPzE(p_mag * sinTheta, 0.0, p_mag * cosTheta, sqrt(p_mag*p_mag + m1*m1));
+//         return v;
+//     }();
+//     TLorentzVector d1_rest_minus = [&]() {
+//         double cosTheta = -1.0;
+//         double sinTheta = sqrt(max(0.0, 1.0 - cosTheta*cosTheta));
+//         TLorentzVector v;
+//         v.SetPxPyPzE(p_mag * sinTheta, 0.0, p_mag * cosTheta, sqrt(p_mag*p_mag + m1*m1));
+//         return v;
+//     }();
+
+//     TVector3 boostToLab = parent_lab.BoostVector();
+//     d1_rest_plus.Boost(boostToLab);
+//     d1_rest_minus.Boost(boostToLab);
+
+//     double t_plus  = invariantSquare(p_virtual_lab, d1_rest_plus);
+//     double t_minus = invariantSquare(p_virtual_lab, d1_rest_minus);
+
+//     double t_min = std::min(t_plus, t_minus);
+//     double t_max = std::max(t_plus, t_minus);
+
+//     // Skip unphysical events
+//     if (!isfinite(t_min) || !isfinite(t_max) || t_min >= t_max) {
+//         TLorentzVector nanv(0,0,0,0);
+//         return make_pair(nanv, nanv);
+//     }
+
+//     double cosT = 0.0;
+
+//     if (B > 0) {
+//         vector<double> t_candidates(nCandidates);
+//         vector<double> weights(nCandidates);
+//         double weight_sum = 0.0;
+
+//         for (int i=0; i<nCandidates; ++i) {
+//             t_candidates[i] = rnd.Uniform(t_min, t_max);
+//             // double t_prime = t_candidates[i] - t_min; // <-- t'
+//             // h_tprime->Fill(t_prime); // Fill histogram for each sampled candidate
+//             weights[i] = exp(-B * fabs(t_candidates[i] - t_min));
+//             weight_sum += weights[i];
+//         }
+//         for (int i=0; i<nCandidates; ++i) {
+//             weights[i] /= weight_sum;
+//         }
+
+//         // Weighted selection
+//         double r = rnd.Uniform(0.0, 1.0);
+//         double cumsum = 0.0;
+//         int pick_idx = 0;
+//         for (; pick_idx < nCandidates; ++pick_idx) {
+//             cumsum += weights[pick_idx];
+//             if (r <= cumsum) break;
+//         }
+//         if (pick_idx >= nCandidates) pick_idx = nCandidates - 1;
+
+//         double t_sampled = t_candidates[pick_idx];
+//         double t_prime_sampled = t_sampled - t_min;
+//         h_tprime->Fill(t_prime_sampled); 
+//         cosT = 1.0 - 2.0 * (t_sampled - t_min) / (t_max - t_min);
+//         cosT = std::clamp(cosT, -1.0, 1.0);
+
+//     } else {
+//         // Uniform cos(theta)
+//         cosT = rnd.Uniform(-1.0, 1.0);
+//     }
+
+//     // Final decay kinematics
+//     double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
+//     double sinT = sqrt(max(0.0, 1.0 - cosT*cosT));
+
+//     TLorentzVector d1_rest;
+//     d1_rest.SetPxPyPzE(p_mag * sinT * cos(phi),
+//                        p_mag * sinT * sin(phi),
+//                        p_mag * cosT,
+//                        sqrt(p_mag*p_mag + m1*m1));
+
+//     TLorentzVector d2_rest(-d1_rest.Vect(), sqrt(p_mag*p_mag + m2*m2));
+
+//     d1_rest.Boost(boostToLab);
+//     d2_rest.Boost(boostToLab);
+
+//     return make_pair(d1_rest, d2_rest);
+// }
+
+pair<TLorentzVector,TLorentzVector> twoBodyDecayWeighted(
+    const TLorentzVector &parent_lab,
+    double m1, double m2,
+    double B,
+    const TLorentzVector &p_virtual_lab,
+    TRandom3 &rnd,
+    int nCandidates = 10000) 
+{
     double M = parent_lab.M();
     if (M <= m1 + m2) {
         TLorentzVector nanv(0,0,0,0);
@@ -65,94 +174,68 @@ pair<TLorentzVector,TLorentzVector> twoBodyDecayWeighted(const TLorentzVector &p
     }
 
     double p_mag = twoBodyMomentum(M, m1, m2);
-    if (!isfinite(p_mag)) {
+    if (!std::isfinite(p_mag)) {
         TLorentzVector nanv(0,0,0,0);
         return make_pair(nanv, nanv);
     }
 
-    // Calculate t at cosTheta = ±1
-    TLorentzVector d1_rest_plus = [&]() {
-        double cosTheta = +1.0;
-        double sinTheta = sqrt(max(0.0, 1.0 - cosTheta*cosTheta));
-        TLorentzVector v;
-        v.SetPxPyPzE(p_mag * sinTheta, 0.0, p_mag * cosTheta, sqrt(p_mag*p_mag + m1*m1));
-        return v;
-    }();
-    TLorentzVector d1_rest_minus = [&]() {
-        double cosTheta = -1.0;
-        double sinTheta = sqrt(max(0.0, 1.0 - cosTheta*cosTheta));
-        TLorentzVector v;
-        v.SetPxPyPzE(p_mag * sinTheta, 0.0, p_mag * cosTheta, sqrt(p_mag*p_mag + m1*m1));
-        return v;
-    }();
+    // ==== PDG t_min / t_max calculation in parent rest frame ====
+    TVector3 boost_to_parent = -parent_lab.BoostVector(); // LAB -> parent rest
+    TLorentzVector q_star = p_virtual_lab;
+    q_star.Boost(boost_to_parent);
 
-    TVector3 boostToLab = parent_lab.BoostVector();
-    d1_rest_plus.Boost(boostToLab);
-    d1_rest_minus.Boost(boostToLab);
+    const double pK = p_mag;                              // |p_K^*|
+    const double EK = std::sqrt(m1*m1 + pK*pK);           //  E_K^*
+    const double pq = q_star.P();                         // |q^*|
+    const double Eq = q_star.E();                         //  E_q^*
+    const double mq2 = q_star.M2();                       // q^2
 
-    double t_plus  = invariantSquare(p_virtual_lab, d1_rest_plus);
-    double t_minus = invariantSquare(p_virtual_lab, d1_rest_minus);
+    // t(cosθ*) = mq2 + m1^2 - 2( Eq*EK - pq*pK*cosθ* )
+    const double t_min = mq2 + m1*m1 - 2.0*(Eq*EK + pq*pK); // cosθ* = +1
+    const double t_max = t_min - 4.0*pq*pK;                 // cosθ* = -1
 
-    double t_min = std::min(t_plus, t_minus);
-    double t_max = std::max(t_plus, t_minus);
-
-    // Skip unphysical events
-    if (!isfinite(t_min) || !isfinite(t_max) || t_min >= t_max) {
+    if (!std::isfinite(t_min) || !std::isfinite(t_max) || !(t_max < t_min) || pq <= 0.0) {
         TLorentzVector nanv(0,0,0,0);
         return make_pair(nanv, nanv);
     }
 
-    double cosT = 0.0;
-
+    // ==== Sample t with exponential weighting or uniform ====
+    double t_sampled = 0.0;
     if (B > 0) {
-        vector<double> t_candidates(nCandidates);
-        vector<double> weights(nCandidates);
-        double weight_sum = 0.0;
-
-        for (int i=0; i<nCandidates; ++i) {
-            t_candidates[i] = rnd.Uniform(t_min, t_max);
-            // double t_prime = t_candidates[i] - t_min; // <-- t'
-            // h_tprime->Fill(t_prime); // Fill histogram for each sampled candidate
-            weights[i] = exp(-B * fabs(t_candidates[i] - t_min));
-            weight_sum += weights[i];
-        }
-        for (int i=0; i<nCandidates; ++i) {
-            weights[i] /= weight_sum;
-        }
-
-        // Weighted selection
-        double r = rnd.Uniform(0.0, 1.0);
-        double cumsum = 0.0;
-        int pick_idx = 0;
-        for (; pick_idx < nCandidates; ++pick_idx) {
-            cumsum += weights[pick_idx];
-            if (r <= cumsum) break;
-        }
-        if (pick_idx >= nCandidates) pick_idx = nCandidates - 1;
-
-        double t_sampled = t_candidates[pick_idx];
-        double t_prime_sampled = t_sampled - t_min;
-        h_tprime->Fill(t_prime_sampled); 
-        cosT = 1.0 - 2.0 * (t_sampled - t_min) / (t_max - t_min);
-        cosT = std::clamp(cosT, -1.0, 1.0);
-
+        // Importance sampling: exponential slope in (t_max, t_min)
+        const double Xmax = (t_min - t_max);
+        double X;
+        do {
+            double u = std::max(1e-16, rnd.Uniform());
+            X = -std::log(u)/B;
+        } while (X > Xmax);
+        t_sampled = t_min - X;
+        h_tprime->Fill(-(t_sampled - t_min)); //here t_max < t_min and X is always positve so t_sampled tmin-X is always less than t_min
     } else {
-        // Uniform cos(theta)
-        cosT = rnd.Uniform(-1.0, 1.0);
+        // Uniform in cosθ* means uniform t since t ~ linear(cosθ*)
+        t_sampled = rnd.Uniform(t_max, t_min);
     }
 
-    // Final decay kinematics
-    double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
-    double sinT = sqrt(max(0.0, 1.0 - cosT*cosT));
+    // ==== Exact PDG mapping t -> cosθ* ====
+    double cosT = 1.0 - (t_min - t_sampled)/(2.0*pq*pK);
+    cosT = std::clamp(cosT, -1.0, 1.0);
+    const double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
+    const double sinT = std::sqrt(std::max(0.0, 1.0 - cosT*cosT));
 
-    TLorentzVector d1_rest;
-    d1_rest.SetPxPyPzE(p_mag * sinT * cos(phi),
-                       p_mag * sinT * sin(phi),
-                       p_mag * cosT,
-                       sqrt(p_mag*p_mag + m1*m1));
+    // ==== Build daughter momenta in parent rest frame ====
+    TVector3 ez = q_star.Vect();
+    if (ez.Mag2() > 0) ez = ez.Unit(); else ez = TVector3(0,0,1);
+    TVector3 tmp = (std::fabs(ez.Z()) < 0.9) ? TVector3(0,0,1) : TVector3(1,0,0);
+    TVector3 ex = (tmp.Cross(ez)).Unit();
+    TVector3 ey = (ez.Cross(ex)).Unit();
 
-    TLorentzVector d2_rest(-d1_rest.Vect(), sqrt(p_mag*p_mag + m2*m2));
+    TVector3 pK_dir = (sinT*std::cos(phi))*ex + (sinT*std::sin(phi))*ey + (cosT)*ez;
+    TLorentzVector d1_rest(pK*pK_dir.X(), pK*pK_dir.Y(), pK*pK_dir.Z(), EK);
 
+    TLorentzVector d2_rest(-d1_rest.Vect(), std::sqrt(p_mag*p_mag + m2*m2));
+
+    // ==== Boost daughters back to LAB frame ====
+    TVector3 boostToLab = parent_lab.BoostVector();
     d1_rest.Boost(boostToLab);
     d2_rest.Boost(boostToLab);
 
