@@ -33,6 +33,27 @@ struct DecayResult {
     double t_max;
 };
 
+struct Range {
+        double min;
+        double max;
+        bool is_range; // true = sample uniformly, false = single value
+        double sample(TRandom3 &rnd) const {
+            return is_range ? rnd.Uniform(min, max) : min;
+        }
+};
+
+struct ReadInput {
+    int num_events;
+    double beam_energy;
+    double target_mass;
+    Range Q2_range;
+    Range E_range;
+    Range theta_range;
+    double W_min;
+    double t_slope;
+};
+
+
 // Helper functions
 double twoBodyMomentum(double M, double m1, double m2) {
     if(M <= m1+m2) return NAN;
@@ -45,17 +66,52 @@ double invariantSquare(const TLorentzVector &a, const TLorentzVector &b, bool us
     return d.M2();
 }
 
-// EventGenerator class
-class eventGenerator_test {
-public:
-    struct Range {
-        double min;
-        double max;
-        bool is_range; // true = sample uniformly, false = single value
-        double sample(TRandom3 &rnd) const {
-            return is_range ? rnd.Uniform(min, max) : min;
+ReadInput readInputFile(const string &filename) {
+        ReadInput input;
+        ifstream fin(filename);
+        if (!fin.is_open()) {
+            cerr << "ERROR: cannot open " << filename << " for reading." << endl;
+            return input;
         }
-    };
+        string line;
+        while (getline(fin, line)) {
+            istringstream iss(line);
+            string key;
+            if (!(iss >> key)) { continue; } // skip empty lines
+            if (key[0] == '#') { continue; } // skip comments
+            if (key == "num_events:") {
+                iss >> input.num_events;
+            } else if (key == "beam_energy:") {
+                iss >> input.beam_energy;
+            } else if (key == "target_mass:") {
+                iss >> input.target_mass;
+            } else if (key == "Q2_range:") {
+                double min, max;
+                iss >> min >> max;
+                input.Q2_range = {min, max, true};
+            } else if (key == "E_range:") {
+                double min, max;
+                iss >> min >> max;
+                input.E_range = {min, max, true};
+            } else if (key == "theta_range:") {
+                double min, max;
+                iss >> min >> max;
+                input.theta_range = {min*TMath::DegToRad(), max*TMath::DegToRad(), true};
+            } else if (key == "W_min:") {
+                iss >> input.W_min;
+            } else if (key == "t_slope:") {
+                iss >> input.t_slope;
+            } else {
+                cerr << "WARNING: unrecognized key '" << key << "' in " << filename << endl;
+            }
+        }
+        fin.close();
+        return input;
+    }
+
+// EventGenerator class
+class eventGenerator {
+public:
 
     struct ElectroProduction {
         TLorentzVector p_beam;
@@ -70,7 +126,7 @@ public:
     double target_mass;
     TRandom3 rnd;
 
-    eventGenerator_test(int n, double Ebeam, double Mtarget)
+    eventGenerator(int n, double Ebeam, double Mtarget)
         : num_events(n), beam_energy(Ebeam), target_mass(Mtarget), rnd(0) {}
 
     ElectroProduction generateScatteredElectron(const Range &Q2_range,
@@ -175,25 +231,24 @@ public:
 
         return {d1_rest,d2_rest,t_min,t_max};
     }
+
 };
 
+
+
 void runEventGenerator() {
-    const int num_events = 10000;
-    const double beam_energy = 10.2;
-    const double B = 2.0;
+    cout << "Reading input file..." << endl;
+    auto input = readInputFile("input.txt");
 
-    eventGenerator_test gen(num_events, beam_energy, PDG::proton);
+    cout << "Initializing event generator..." << endl;
 
-    eventGenerator_test::Range Q2_range {0.0, 6.0, true};   // range
-    eventGenerator_test::Range E_range  {0.5, 6.0, true};   // range
-    eventGenerator_test::Range theta_range {5.0*TMath::DegToRad(), 35.0*TMath::DegToRad(), true}; // range in radians
-    double W_min = 4.0;
+    eventGenerator gen(input.num_events, input.beam_energy, input.target_mass);
 
     TH1D *h_e_theta    = new TH1D("h_e_theta", "Scattered electron #theta; #theta [rad]; Counts", 100, 0.0, 180);
 
-    TLorentzVector p_target = TLorentzVector(0, 0, 0, PDG::proton);
-    TLorentzVector p_beam = TLorentzVector(0, 0, beam_energy, beam_energy);
-    auto electronEvents = gen.generateScatteredElectron(Q2_range, E_range, theta_range, W_min);
+    TLorentzVector p_target = TLorentzVector(0, 0, 0, input.target_mass);
+    TLorentzVector p_beam = TLorentzVector(0, 0, input.beam_energy, input.beam_energy);
+    auto electronEvents = gen.generateScatteredElectron(input.Q2_range, input.E_range, input.theta_range, input.W_min);
 
     cout << "Generated " << electronEvents.v_scattered.size() << " events passing W_min" << endl;
 
@@ -203,10 +258,10 @@ void runEventGenerator() {
     }
 
     // Example of a decay
-    vector<TLorentzVector> p1_lab_list; p1_lab_list.reserve(num_events);
-    vector<TLorentzVector> X_lab_list;  X_lab_list.reserve(num_events);
-    vector<TLorentzVector> p2_lab_list; p2_lab_list.reserve(num_events);
-    vector<TLorentzVector> pbar_lab_list; pbar_lab_list.reserve(num_events);
+    vector<TLorentzVector> p1_lab_list; p1_lab_list.reserve(input.num_events);
+    vector<TLorentzVector> X_lab_list;  X_lab_list.reserve(input.num_events);
+    vector<TLorentzVector> p2_lab_list; p2_lab_list.reserve(input.num_events);
+    vector<TLorentzVector> pbar_lab_list; pbar_lab_list.reserve(input.num_events);
 
     TH1D *h_t_gamma_k1 = new TH1D("h_t_gamma_k1", "t: virtual gamma - K1; t [GeV^{2}]; Counts", 100, 0, 6.0);
     TH1D *h_t_p_X      = new TH1D("h_t_p_X",       "t: proton - X; t [GeV^{2}]; Counts", 100, 0, 6.0);
@@ -217,7 +272,7 @@ void runEventGenerator() {
         double mX = 2.5;
         if (mX <= (mp + mpbar)) continue;
 
-        auto decay1 = gen.twoBodyDecayWeighted(electronEvents.v_W[i], mp, mX, B, electronEvents.v_virtual[i]);
+        auto decay1 = gen.twoBodyDecayWeighted(electronEvents.v_W[i], mp, mX, input.t_slope, electronEvents.v_virtual[i]);
         TLorentzVector p_p1_lab = decay1.d1_lab;
         TLorentzVector p_X_lab  = decay1.d2_lab;
 
@@ -255,7 +310,7 @@ void runEventGenerator() {
         int nEvents = (int)p1_lab_list.size();
         for (int i=0;i<nEvents;++i) {
             int num_particles = 4;
-            fout << "\t" << num_particles << " 1 1 0 0 11 " << beam_energy << " 2212 " << PDG::proton << " 0\n";
+            fout << "\t" << num_particles << " 1 1 0 0 11 " << input.beam_energy << " 2212 " << PDG::proton << " 0\n";
             double vz_rand = gen.rnd.Uniform(-5.0, 0.0);
             // 1) p1
             {

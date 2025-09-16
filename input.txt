@@ -1,8 +1,10 @@
 # This is the beginning of adding in an input file for the event generator class
-num_events=100000
-beam_energy=10.2
-smear_sigma=0.0
-target_mass=0.938
-t_slope=4
-target_pid=2212
-#reaction=2212, 9999:2212, -2212
+num_events:     10000
+beam_energy:    10.2
+W_min:          4
+target_mass:    0.938
+theta_range:    5 35
+E_range:        2 6
+Q2_range:       0 6
+t_slope:        4
+#reaction:2212, 9999:2212, -2212
