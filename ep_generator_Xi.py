@@ -3,6 +3,10 @@
 import numpy as np
 import vector as vec
 import matplotlib.pyplot as plt
+<<<<<<< Updated upstream
+=======
+# from breit_wigner import breit_wigner
+>>>>>>> Stashed changes
 import random
 from scipy.optimize import curve_fit
 ### Constants ###
@@ -396,3 +400,122 @@ for i in range(10):
     print(f"Saved {filename}")
 
 
+<<<<<<< Updated upstream
+=======
+# #%%
+
+EG = EventGenerator(beam_energy=6.5, target_mass=PDG_ID[2212], num_events=1_000_000, smear_sigma=0)
+
+
+
+#EG = EventGenerator(input_file='/Users/biancagualtieri/Desktop/researchSpring25/simulations/input.txt')
+p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min = 3.0, det=None)
+#p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.normal(2.5, 0., EG.num_events), B = None, detector_mask=None)
+#mass2_vals = breit_wigner(mean=2.0, width=0.2, size=len(p_W))
+p_Km, p_X = EG.two_body_decay(p_W, PDG_ID[321], np.random.laplace(2.5, 0., len(p_W)) , B = 0, detector_mask=None)
+
+
+p_X_RF = p_X.boostCM_of(p_X) 
+p_Kb, p_Xi = EG.two_body_decay(p_X, PDG_ID[321], PDG_ID[3312], B = None, detector_mask=None)
+#%%
+# Boost the particles to the lab frame
+p_Km = p_Km[~np.isnan(p_X.M)]
+p_Kb = p_Kb[~np.isnan(p_X.M)]
+p_Xi = p_Xi[~np.isnan(p_X.M)]
+p_virtual = p_virtual[~np.isnan(p_X.M)]
+p_scattered = p_scattered[~np.isnan(p_X.M)]
+p_W = p_W[~np.isnan(p_X.M)]
+p_X = p_X[~np.isnan(p_X.M)]
+
+p_X_LF = p_X.boost((p_virtual + EG.p_target).to_beta3())
+p_Km_LF = p_Km.boost((p_virtual + EG.p_target).to_beta3())
+p_Kb_LF = p_Kb.boost((p_X_LF).to_beta3())
+p_Xi_LF = p_Xi.boost((p_X_LF).to_beta3())
+
+
+#Plot 1: Invariant mass of X and Kb+Xi
+fig, ax = plt.subplots()
+ax.hist(p_X_LF.M, bins=100, range=(2.4, 2.6), label=r'Generated X')
+ax.hist((p_Kb_LF + p_Xi_LF).M, bins=100, range=(2.4, 2.6), histtype='step', label=r'Kb+Xi Mass')
+ax.legend()
+ax.set_xlabel('Mass (GeV/c²)')
+ax.set_ylabel('Counts')
+
+# Plot 2: Cos(theta) in X rest frame
+fig, ax = plt.subplots()
+ax.hist(np.cos(p_Kb.theta), bins=100, range=(-1, 1), label=r'$\cos\theta_{Kb_{XRF}}$')
+ax.hist(-np.cos(p_Xi.theta), bins=100, range=(-1, 1), histtype='step', label=r'$-\cos\theta_{Xi_{XRF}}$')
+ax.legend()
+ax.set_xlabel(r'$\cos\theta$')
+ax.set_ylabel('Counts')
+
+fig, ax = plt.subplots()
+ax.hist(np.degrees(p_Km.phi), bins=100, range=(-180, 180), label=r'$\phi_{Km_{XRF}}$')
+ax.hist(np.degrees(p_X.phi), bins=100, range=(-180, 180), histtype='step', label=r'$\phi_{X_{XRF}}$')
+ax.legend()
+ax.set_xlabel(r'$\phi$ (rad)')
+ax.set_ylabel('Counts')
+
+# Plot 3: Phi in X rest frame
+fig, ax = plt.subplots()
+ax.hist(np.degrees(p_Kb.phi), bins=100, range=(-180, 180), label=r'$\phi_{Kb_{XRF}}$')
+ax.hist(np.degrees(p_Xi.phi), bins=100, range=(-180, 180), histtype='step', label=r'$\phi_{Xi_{XRF}}$')
+ax.legend()
+ax.set_xlabel(r'$\phi$ (rad)')
+ax.set_ylabel('Counts')
+
+# Plot 4: Cos(theta) of X and Km
+fig, ax = plt.subplots()
+ax.hist(np.cos(p_X.theta), bins=100, range=(-1, 1), label=r'$\cos\theta_{X}$')
+ax.hist(-np.cos(p_Km.theta), bins=100, range=(-1, 1), histtype='step', label=r'$-\cos\theta_{Km}$')
+ax.legend()
+ax.set_xlabel(r'$\cos\theta$')
+ax.set_ylabel('Counts')
+plt.show()
+
+
+
+p_miss = EG.p_beam + EG.p_target - p_scattered - p_Km_LF - p_Kb_LF
+# Plot 5: Missing Mass
+fig, ax = plt.subplots()
+ax.hist(p_miss.M, bins=100, range=(0, 2), alpha=0.7, label='Missing Mass')
+ax.set_xlabel('Missing Mass (GeV/c²)')
+ax.set_ylabel('Counts')
+plt.show()
+# hists.histo(p_miss.M, bins=100, range=(0, 2), alpha=0.7, label='Missing Mass')
+
+#t = p_virtual - p_X_LF
+t = p_virtual - p_Km_LF
+t_prime = EG.p_target - p_X_LF
+fig, ax = plt.subplots()
+
+
+#hists.histo(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)', ax = ax)
+# hists.histo(-t_prime.M2, bins=100, histtype = 'step', label=r't-Channel ($p_{target}p_{1}}$)', ax = ax)
+
+fig, ax = plt.subplots()
+
+# Histogram for -t.M2
+ax.hist(-t.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)', alpha=0.7)
+
+# Step-style histogram for -t_prime.M2
+ax.hist(-t_prime.M2, bins=100, histtype='step', label=r't-Channel ($p_{target}}p_X)')
+
+# Add labels and legend
+ax.set_xlabel(r'$-t$ [GeV$^2$]')
+ax.set_ylabel('Counts')
+ax.legend()
+
+plt.show()
+# %%
+particles = [
+    {'vec': p_Kb_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
+    {'vec': p_Xi_LF, 'pid': -3312, 'charge': -1, 'mass': PDG_ID[3312], 'vx': 0, 'vy': 0, 'vz': 0},
+    {'vec': p_Km_LF, 'pid': 321, 'charge': 1, 'mass': PDG_ID[321], 'vx': 0, 'vy': 0, 'vz': 0},
+    {'vec': p_scattered, 'pid': 11, 'charge': 1, 'mass': PDG_ID[11], 'vx': 0, 'vy': 0, 'vz': 0}
+]
+# %%
+EG.write_LUND(particles, "test.lund")
+
+#%%
+>>>>>>> Stashed changes

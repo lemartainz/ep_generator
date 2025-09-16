@@ -75,6 +75,7 @@ public:
 
     ElectroProduction generateScatteredElectron(const Range &Q2_range,
                                                 const Range &E_range,
+                                                const Range &theta_range,
                                                 double W_min) {
         ElectroProduction event;
         event.p_beam   = TLorentzVector(0,0,beam_energy, beam_energy);
@@ -87,6 +88,10 @@ public:
             if(!isfinite(arg) || arg<-1.0 || arg>1.0) continue;
 
             double theta = acos(arg);
+
+            if (theta < theta_range.min || theta > theta_range.max) {
+                continue;
+            }
             double phi   = rnd.Uniform(-TMath::Pi(), TMath::Pi());
 
             TLorentzVector p_scattered(E_scattered*sin(theta)*cos(phi),
@@ -173,7 +178,7 @@ public:
 };
 
 void runEventGenerator() {
-    const int num_events = 100000;
+    const int num_events = 10000;
     const double beam_energy = 10.2;
     const double B = 2.0;
 
@@ -181,14 +186,21 @@ void runEventGenerator() {
 
     eventGenerator_test::Range Q2_range {0.0, 6.0, true};   // range
     eventGenerator_test::Range E_range  {0.5, 6.0, true};   // range
+    eventGenerator_test::Range theta_range {5.0*TMath::DegToRad(), 35.0*TMath::DegToRad(), true}; // range in radians
     double W_min = 4.0;
 
+    TH1D *h_e_theta    = new TH1D("h_e_theta", "Scattered electron #theta; #theta [rad]; Counts", 100, 0.0, 180);
 
     TLorentzVector p_target = TLorentzVector(0, 0, 0, PDG::proton);
     TLorentzVector p_beam = TLorentzVector(0, 0, beam_energy, beam_energy);
-    auto electronEvents = gen.generateScatteredElectron(Q2_range, E_range, W_min);
+    auto electronEvents = gen.generateScatteredElectron(Q2_range, E_range, theta_range, W_min);
 
     cout << "Generated " << electronEvents.v_scattered.size() << " events passing W_min" << endl;
+
+    for (const auto& event : electronEvents.v_scattered) {
+        double theta = event.Theta();
+        h_e_theta->Fill(theta*TMath::RadToDeg());
+    }
 
     // Example of a decay
     vector<TLorentzVector> p1_lab_list; p1_lab_list.reserve(num_events);
@@ -199,13 +211,13 @@ void runEventGenerator() {
     TH1D *h_t_gamma_k1 = new TH1D("h_t_gamma_k1", "t: virtual gamma - K1; t [GeV^{2}]; Counts", 100, 0, 6.0);
     TH1D *h_t_p_X      = new TH1D("h_t_p_X",       "t: proton - X; t [GeV^{2}]; Counts", 100, 0, 6.0);
 
+    cout << "Processing decays..." << endl;
     double mp = PDG::proton, mpbar = PDG::proton;
     for(size_t i=0;i<electronEvents.v_W.size();i++){
         double mX = 2.5;
         if (mX <= (mp + mpbar)) continue;
 
         auto decay1 = gen.twoBodyDecayWeighted(electronEvents.v_W[i], mp, mX, B, electronEvents.v_virtual[i]);
-
         TLorentzVector p_p1_lab = decay1.d1_lab;
         TLorentzVector p_X_lab  = decay1.d2_lab;
 
@@ -233,6 +245,63 @@ void runEventGenerator() {
 
     }
     cout << "Finished processing decays." << endl;
+
+    cout << "Creating LUND file..." << endl;
+    // Write to LUND file
+    ofstream fout("events.lund");
+    if (!fout.is_open()) {
+        cerr << "ERROR: cannot open events.lund for writing." << endl;
+    } else {
+        int nEvents = (int)p1_lab_list.size();
+        for (int i=0;i<nEvents;++i) {
+            int num_particles = 4;
+            fout << "\t" << num_particles << " 1 1 0 0 11 " << beam_energy << " 2212 " << PDG::proton << " 0\n";
+            double vz_rand = gen.rnd.Uniform(-5.0, 0.0);
+            // 1) p1
+            {
+                int j = 1;
+                int pid = 2212; // proton
+                TLorentzVector &v = p1_lab_list[i];
+                fout << j << " " << 0 << " " << 1 << " " << pid << " 0 0 ";
+                fout << std::fixed << std::setprecision(6)
+                     << v.Px() << " " << v.Py() << " " << v.Pz() << " " << v.E() << " "
+                     << mp << " " << vz_rand << " " << 0.0 << "\n";
+            }
+            // 2) pbar
+            {
+                int j = 2;
+                int pid = -2212; // antiproton
+                TLorentzVector &v = pbar_lab_list[i];
+                fout << j << " " << 0 << " " << 1 << " " << pid << " 0 0 ";
+                fout << std::fixed << std::setprecision(6)
+                     << v.Px() << " " << v.Py() << " " << v.Pz() << " " << v.E() << " "
+                     << mpbar << " " << vz_rand << " " << 0.0 << "\n";
+            }
+            // 3) p2
+            {
+                int j = 3;
+                int pid = 2212; // proton
+                TLorentzVector &v = p2_lab_list[i];
+                fout << j << " " << 0 << " " << 1 << " "    << pid << " 0 0 ";
+                fout << std::fixed << std::setprecision(6)
+                     << v.Px() << " " << v.Py() << " " << v.Pz() << " " << v.E() << " "
+                     << mp << " " << vz_rand << " " << 0.0 << "\n";
+            }
+            // 4) scattered electron
+            {
+                int j = 4;
+                int pid = 11;
+                TLorentzVector &v = electronEvents.v_scattered[i];
+                fout << j << " " << 0 << " " << 1 << " " << pid << " 0 0 ";
+                fout << std::fixed << std::setprecision(6)
+                     << v.Px() << " " << v.Py() << " " << v.Pz() << " " << v.E() << " "
+                     << PDG::electron << " " << vz_rand << " " << 0.0 << "\n";
+            }
+            fout << "\n";
+        }
+        fout.close();
+        cout << "Written events.lund" << endl;
+    }
 
     double fit_min = 0.;
     double fit_max = 6.0;
@@ -262,5 +331,9 @@ void runEventGenerator() {
     f_exp_p_X->SetLineColor(kRed);
     f_exp_p_X->Draw("same");
     c1->Update();
+
+    TCanvas *c2 = new TCanvas("c2","t distributions log",1200,500);
+    h_e_theta->Draw();
+    c2->Update();
 }
 

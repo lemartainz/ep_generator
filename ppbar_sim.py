@@ -153,32 +153,44 @@ class EventGenerator:
         p_virtual_CM = self.p_virtual.boostCM_of(self.p_W) # Boost virtual photon to CM frame of W and virtual photon
         p_W_CM = self.p_W.boostCM_of(self.p_W) 
         p_target_CM = self.p_target.boostCM_of(self.p_W)  # Boost target to CM frame of W and virtual photon
-        # print(f"p_virtual_CM: {p_virtual_CM.M}, p_target_CM: {p_target_CM.M}")
-
-        t_max = ((p_virtual_CM.M2 - mass2**2 - p_target_CM.M2 + mass1**2) / (2 * p_W_CM.M))**2 - (p_virtual_CM.mag + p_mag)**2
-        t_min = ((p_virtual_CM.M2 - mass2**2 - p_target_CM.M2 + mass1**2) / (2 * p_W_CM.M))**2 - (p_virtual_CM.mag - p_mag)**2
-        self.t_min = t_min
-        self.t_max = t_max
-        # print(f"t_min: {t_min}, t_max: {t_max}")
 
         if (B is not None) and (B > 0):
             # Sample t-values with exp(-t*B) weighting
+            t_max = ((p_virtual_CM.M2 - mass2**2 - p_target_CM.M2 + mass1**2) / (2 * p_W_CM.M))**2 - (p_virtual_CM.mag + p_mag)**2
+            t_min = ((p_virtual_CM.M2 - mass2**2 - p_target_CM.M2 + mass1**2) / (2 * p_W_CM.M))**2 - (p_virtual_CM.mag - p_mag)**2
+            # print(f"t_min: {t_min}, t_max: {t_max}")
+            self.t_min = t_min
+            self.t_max = t_max
+            # print(f"t_min: {self.t_min}, t_max: {self.t_max}")
             cos_theta = np.empty(N)
+
             for i in range(N):
-                if t_min[i] >= t_max[i]:
-                    t_candidates = np.random.uniform(t_max[i], t_min[i], size=10000)  # broader pool
 
-                    weights = np.exp(-np.abs(t_candidates - t_min[i]) * B)
-                    probs = weights / np.sum(weights)
-                    t_sampled = np.random.choice(t_candidates, size = 1, p=probs)
-                    cos_theta[i] = 1 - 2 * (t_sampled - t_min[i]) / (t_max[i] - t_min[i])
+                # print(f"i={i} t_min={t_min[i]:.6f} t_max={t_max[i]:.6f}")
+                # low = min(t_min[i], t_max[i])
+                # high = max(t_min[i], t_max[i])
+                # t_candidates = np.random.uniform(low, high, size=10000)
+                # print(f"  sampling in [{low:.6f}, {high:.6f}] -> cand_min={t_candidates.min():.6f}, cand_max={t_candidates.max():.6f}")
+    
+                t_candidates = np.random.uniform(t_max[i], t_min[i], size=10000)  # broader pool
 
-            # plt.hist(t_sampled, bins=10, alpha=0.5, label='t candidates')
+                weights = np.exp((t_candidates) * B)
+                probs = weights / np.sum(weights)
+                t_sampled = np.random.choice(t_candidates, size = 1, p=probs)
+                cos_theta[i] = 2 * (t_sampled - t_max[i]) / (t_min[i] - t_max[i]) - 1
+
+            # self.t_candidates = t_candidates
+            # self.t_sampled = t_sampled
+            # plt.hist(t_candidates, bins=100, alpha=0.5, label='t candidates')
+            # plt.figure()
+            # plt.hist(t_sampled, bins=100, alpha=0.5, label='t sampled')
 
         elif (B is None) or (B == 0):
             # Uniform distribution for cos(theta)
             cos_theta = np.random.uniform(-1, 1, N)
-
+        
+        # print(p_mag.shape, cos_theta.shape)
+        cos_theta = np.clip(cos_theta, -1, 1)  # Ensure cos(theta) is within valid range
         theta = np.arccos(cos_theta)
         phi = np.random.uniform(-np.pi, np.pi, N)
         sin_theta = np.sqrt(1 - cos_theta**2)
@@ -231,6 +243,7 @@ class EventGenerator:
     #         'pz': E_scattered[mask] * np.cos(theta[mask]),
     #         'E': E_scattered[mask]
     #     })
+
     #     p_virtual = self.p_beam - p_scattered
     #     p_W = self.p_beam + self.p_target - p_scattered # type: ignore
     #     return p_scattered, p_virtual, p_W, mask
@@ -298,6 +311,7 @@ class EventGenerator:
             p_W = self.p_beam + self.p_target - p_scattered
 
             W = p_W.mass
+            print(W)
 
             if det is None:
                 det_mask = np.full(batch_size, True, dtype=bool)
@@ -305,7 +319,7 @@ class EventGenerator:
                 det_mask = self.in_acceptance(np.degrees(theta), det=det)
 
             good_mask = (W >= W_min) & det_mask
-            
+
             if np.sum(good_mask) == 0:
                 print("No events passed the acceptance cuts, retrying...")
                 continue
@@ -365,21 +379,21 @@ class EventGenerator:
 
 # EG = EventGenerator(beam_energy=10.2, target_mass=PDG_ID[2212], num_events=10, smear_sigma=0)
 EG = EventGenerator(input_file='input.txt')
-p_scattered, p_virtual, p_W = EG.generate_scattered_electron(Q2_range = 6, E_range = 4, W_min = 4, det=None)
-p_p1, p_X = EG.two_body_decay(p_W, PDG_ID[2212], 2.325, B = 1, detector_mask=None)
+p_scattered, p_virtual, p_W = EG.generate_scattered_electron(Q2_range = 1, E_range = 1, W_min = 4, det=None)
+p_p1, p_X = EG.two_body_decay(p_W, PDG_ID[2212], 2.325, B = 4, detector_mask=None)
 p_X_RF = p_X.boostCM_of(p_X)
 p_p2, p_pbar = EG.two_body_decay(p_X, PDG_ID[2212], PDG_ID[2212], B = None, detector_mask=None)
 #%%
 # Boost the particles to the lab frame
-p_p1 = p_p1[~np.isnan(p_X.M)]
-p_p2 = p_p2[~np.isnan(p_X.M)]
-p_pbar = p_pbar[~np.isnan(p_X.M)]
-p_virtual = p_virtual[~np.isnan(p_X.M)]
-p_scattered = p_scattered[~np.isnan(p_X.M)]
-p_W = p_W[~np.isnan(p_X.M)]
-t_min = EG.t_min
-t_min = t_min[~np.isnan(p_X.M)]
-p_X = p_X[~np.isnan(p_X.M)]
+# p_p1 = p_p1[~np.isnan(p_X.M)]
+# p_p2 = p_p2[~np.isnan(p_X.M)]
+# p_pbar = p_pbar[~np.isnan(p_X.M)]
+# p_virtual = p_virtual[~np.isnan(p_X.M)]
+# p_scattered = p_scattered[~np.isnan(p_X.M)]
+# p_W = p_W[~np.isnan(p_X.M)]
+# t_min = EG.t_min
+# t_min = t_min[~np.isnan(p_X.M)]
+# p_X = p_X[~np.isnan(p_X.M)]
 # t_min = t_min[~np.isnan(p_X.M)]
 
 p_X_LF = p_X.boost((p_virtual + EG.p_target).to_beta3())
@@ -412,7 +426,7 @@ test = plt.hist(-np.cos(p_p1.theta), bins = 100, range = (-1, 1), histtype = 'st
 t = p_virtual - p_p1_LF
 t_prime = EG.p_target - p_X_LF
 fig, ax = plt.subplots()
-h_t = plt.hist(-t.M2+t_min, bins=100, label=r't-Channel ($\gamma^{*}X$)')
+h_t = plt.hist(-(t.M2 - EG.t_min), bins=100, range = (0, 6), label=r't-Channel ($\gamma^{*}X$)')
 # plt.hist(-t_prime.M2, bins=100, histtype = 'step', linewidth = 2)
 
 def fit_func(t, a, b, c):
@@ -421,13 +435,19 @@ def fit_func(t, a, b, c):
 from scipy.optimize import curve_fit
 # Fit the t-channel distribution
 t_fit = h_t[1][:-1] + np.diff(h_t[1]) / 2
-fit_range = (t_fit > 0) & (t_fit < 5)
+fit_range = (t_fit > 0.55)# & (t_fit < 5)
 t_fit = t_fit[fit_range]
 h_t_fit = h_t[0][fit_range]
-params, unc = curve_fit(fit_func, t_fit, h_t_fit, p0=[1, 0, 0], bounds=([0, 0, -np.inf], [np.inf, 10.0, np.inf]))
+sigma = np.sqrt(h_t_fit)  # Use sqrt of counts as uncertainty
+sigma[sigma == 0] = 1  # Avoid division by zero in curve_fit
+
+params, unc = curve_fit(fit_func, t_fit, h_t_fit, p0=[50000, 5, 0.1], bounds=([0, 0, -np.inf], [np.inf, 10.0, np.inf]), sigma = sigma)
+
+def calc_chi2(t, a, b, c):
+    return np.sum(((h_t_fit - fit_func(t, a, b, c)) / sigma) ** 2) / (len(h_t_fit) + len(params) - 1)
 
 fitted_values = fit_func(t_fit, *params)
-plt.plot(t_fit, fitted_values, color='red', label=f'B: {params[1]:.2f} ± {unc[1,1]:.5f}')
+plt.plot(t_fit, fitted_values, color='red', label=f'B: {params[1]:.2f} ± {unc[1][1]:.5f} \n $\\chi^{2}$: {calc_chi2(t_fit, *params):.2f}', linewidth=2)
 plt.xlabel(r'$-t$ (GeV$^2$)')
 plt.ylabel('Counts')
 plt.title('t-Channel Distribution')
@@ -449,81 +469,62 @@ particles = [
 ]
 # %%
 EG.write_LUND(particles, "../Simulations/test.lund")
-# %% This is a test for the van Hove plot
-
-particles = {'p_e': p_scattered, 'p_p1': p_p1_LF, 'p_p2': p_p2_LF, 'p_pbar': p_pbar_LF}
-
-E_beam = 10.2  # GeV
-beam = vector.obj(px=0, py=0, pz=E_beam, E=E_beam)
-target = vector.obj(px=0, py=0, pz=0, E=0.938)  # proton target
-
-def compute_lps(res : dict):
-    """
-    event: dict with 4-momenta for scattered electron, proton1, proton2, antiproton
-    Returns: (X, Y) coordinates in van Hove plot
-    """
-
-    # Final state particles
-    eprime = res['p_e']
-    p1     = res['p_p1']
-    p2     = res['p_p2']
-    pbar   = res['p_pbar']
-
-    # Reconstruct X = p + p + pbar system
-    X = beam + target - eprime
-
-    # Boost hadrons to CM of hadronic system
-    # boost_vector = -X.to_beta3()
-    p1_cm = p1.boostCM_of(p1 + p2 + pbar)
-    p2_cm = p2.boostCM_of(p1 + p2 + pbar)
-    pbar_cm = pbar.boostCM_of(p1 + p2 + pbar)
-    # p2_cm = p2.boost_p4(boost_vector)
-    # pbar_cm = pbar.boost_p4(boost_vector)
-
-    # Choose beam axis as z
-    z_hat = np.array([0, 0, 1])
-    def proj_longitudinal(p):
-        p_vec = np.array([p.px, p.py, p.pz])
-        return np.dot(p_vec, z_hat)
-
-    pL1 = p1_cm.pz
-    pL2 = p2_cm.pz
-    pL3 = pbar_cm.pz
-    # pL2 = proj_longitudinal(p2_cm)
-    # pL3 = proj_longitudinal(pbar_cm)
-
-    # Symmetrized van Hove coordinates
-    X_vh = (pL1 - pL2) / np.sqrt(2)
-    Y_vh = (pL1 + pL2 - 2 * pL3) / np.sqrt(6)
-
-    return X_vh, Y_vh
 
 # %%
-import matplotlib as mpl
-x, y = compute_lps(particles)
-# plt.figure(figsize=(12,10))
-hists.histo2d(x, y, bins = 100, range  = ((-4, 4), (-4, 4)), norm = mpl.colors.LogNorm())
-plt.xlabel("X (van Hove)")
-plt.ylabel("Y (van Hove)")
-# Plot symmetry axes corresponding to q1=q2, q2=q3, q3=q1
-length = 4.5  # Extend slightly beyond plot range
+for i in range(5):
+    EG = EventGenerator(input_file='input.txt')
+    p_scattered, p_virtual, p_W = EG.generate_scattered_electron(W_min = 4, det=None)
+    p_p1, p_X = EG.two_body_decay(p_W, PDG_ID[2212], 2.325, B = i, detector_mask=None)
+    p_X_RF = p_X.boostCM_of(p_X)
+    p_p2, p_pbar = EG.two_body_decay(p_X, PDG_ID[2212], PDG_ID[2212], B = None, detector_mask=None)
 
-# q1 = q2 -> X = 0 (vertical line)
-plt.plot([-length, length], [0, 0], 'k--', lw=1, label='$q_1 = q_2$')
 
-# q2 = q3 -> theta = -120 degrees
-theta2 = -2 * np.pi / 3
-plt.plot([-length * np.cos(theta2), length * np.cos(theta2)], [-length * np.sin(theta2), length * np.sin(theta2)], 'r--', lw=1, label='$q_2 = q_3$')
+    # Boost the particles to the lab frame
+    p_p1 = p_p1[~np.isnan(p_X.M)]
+    p_p2 = p_p2[~np.isnan(p_X.M)]
+    p_pbar = p_pbar[~np.isnan(p_X.M)]
+    p_virtual = p_virtual[~np.isnan(p_X.M)]
+    p_scattered = p_scattered[~np.isnan(p_X.M)]
+    p_W = p_W[~np.isnan(p_X.M)]
+    t_min = EG.t_min
+    t_min = t_min[~np.isnan(p_X.M)]
+    p_X = p_X[~np.isnan(p_X.M)]
+    # t_min = t_min[~np.isnan(p_X.M)]
 
-# q3 = q1 -> theta = +120 degrees
-theta3 = 2 * np.pi / 3
-plt.plot([-length * np.cos(theta3), length * np.cos(theta3)], [-length * np.sin(theta3), length * np.sin(theta3)], 'b--', lw=1, label='$q_3 = q_1$')
+    p_X_LF = p_X.boost((p_virtual + EG.p_target).to_beta3())
+    p_p1_LF = p_p1.boost((p_virtual + EG.p_target).to_beta3())
+    p_p2_LF = p_p2.boost((p_X_LF).to_beta3())
+    p_pbar_LF = p_pbar.boost((p_X_LF).to_beta3())
 
-# plt.legend(loc='upper right')
-plt.title("Longitudinal Phase Space (van Hove plot)")
-# plt.grid(True)
-# plt.gca().set_aspect('equal')
-plt.show()
-# %%
-hists.histo2d((particles['p_p1'] + particles['p_pbar']).M, (particles['p_p2'] + particles['p_pbar']).M, bins = 100, range = ((1.5, 4), (1.5, 4)), norm = mpl.colors.LogNorm())
+    t = p_virtual - p_p1_LF
+    t_prime = EG.p_target - p_X_LF
+    fig, ax = plt.subplots()
+    h_t = plt.hist(-t_prime.M2, bins=100, label=r't-Channel ($\gamma^{*}X$)')
+    # plt.hist(-t_prime.M2, bins=100, histtype = 'step', linewidth = 2)
+
+    def fit_func(t, a, b, c):
+        return a * np.exp(-b * np.abs(t + c))
+
+
+    from scipy.optimize import curve_fit
+    # Fit the t-channel distribution
+    t_fit = h_t[1][:-1] + np.diff(h_t[1]) / 2
+    fit_range = (t_fit > 0.7)# & (t_fit < 5)
+    t_fit = t_fit[fit_range]
+    h_t_fit = h_t[0][fit_range]
+    sigma = np.sqrt(h_t_fit)  # Use sqrt of counts as uncertainty
+    sigma[sigma == 0] = 1  # Avoid division by zero in curve_fit
+
+    params, unc = curve_fit(fit_func, t_fit, h_t_fit, p0=[10000, i, 0.1], bounds=([0, 0, -np.inf], [np.inf, 10.0, np.inf]), sigma = sigma)
+
+    def calc_chi2(t, a, b, c):
+        return np.sum(((h_t_fit - fit_func(t, a, b, c)) / sigma) ** 2) / (len(h_t_fit) + len(params) - 1)
+
+    fitted_values = fit_func(t_fit, *params)
+    plt.plot(t_fit, fitted_values, color='red', label=f'B: {params[1]:.2f} ± {unc[1][1]:.5f} \n Chi2: {calc_chi2(t_fit, *params):.2f}', linewidth=2)
+    plt.xlabel(r'$-t$ (GeV$^2$)')
+    plt.ylabel('Counts')
+    plt.title('t-Channel Distribution')
+    plt.legend()
+    fig.savefig(f"/Users/leo/Desktop/plots/t_channel_B_{i}.png")
 # %%

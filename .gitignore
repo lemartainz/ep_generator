@@ -1,0 +1,4 @@
+*.root
+*.lund
+.vscode
+.DS_Store
