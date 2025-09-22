@@ -2,3 +2,4 @@
 *.lund
 .vscode
 .DS_Store
+*.pdf
