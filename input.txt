@@ -1,16 +1,16 @@
 # This is the beginning of adding in an input file for the event generator class
 num_events:     100000
 beam_energy:    10.2
-W_min:          4
-target_mass:    0.938
+W_min:          3.5
+target_pid:     2112
 theta_range:    5 35
 E_range:        0 6
 Q2_range:       0 6
-t_slope:        3
+t_slope:        0
 print_debug:    false
 write_lund:     true
 gen_plots:      true
-# mass_X:         BreitWigner(2.3, 0.2) ### Needs to be implemented
+mass_X:         BreitWigner(2.3, 0.2)
 ### If you want to decay multiple particles
 ### Just have to separate using :
 ### Lets say you want the reaction ep->XZ->XWY
@@ -18,4 +18,4 @@ gen_plots:      true
 ### X, Z: Z, W, Y
 ### The first two are always assumed to be some final state particle (X) and an intermediate (Z)
 # reaction:       321, 9999: 9999, 321, 3312
-reaction:       2212, 9999: 9999, 2212, -2212
+reaction:       2112, 9999: 9999, 2212, -2212

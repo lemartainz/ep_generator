@@ -50,7 +50,7 @@ struct Range {
 struct ReadInput {
     int num_events;
     double beam_energy;
-    double target_mass;
+    double target_pid;
     Range Q2_range;
     Range E_range;
     Range theta_range;
@@ -93,8 +93,8 @@ ReadInput readInputFile(const string &filename) {
                 iss >> input.num_events;
             } else if (key == "beam_energy:") {
                 iss >> input.beam_energy;
-            } else if (key == "target_mass:") {
-                iss >> input.target_mass;
+            } else if (key == "target_pid:") {
+                iss >> input.target_pid;
             } else if (key == "Q2_range:") {
                 double min, max;
                 iss >> min >> max;
@@ -250,13 +250,13 @@ public:
 
         double t_plus  = invariantSquare(p_virtual_lab,d1_plus,false);
         double t_minus = invariantSquare(p_virtual_lab,d1_minus,false);
-        double t_min = std::min(t_plus,t_minus);
-        double t_max = std::max(t_plus,t_minus);
+        double t_min = std::max(t_plus,t_minus);
+        double t_max = std::min(t_plus,t_minus);
 
-        if(!isfinite(t_min) || !isfinite(t_max) || t_min>=t_max) return {nanv,nanv,NAN,NAN};
+        if(!isfinite(t_min) || !isfinite(t_max) || t_max>=t_min) return {nanv,nanv,NAN,NAN};
 
-        // Sample cos(theta)
-        double cosT = 0.0;
+        // Sample cos(theta) using exponential weighting in t
+        double cosT;
         if(B>0) {
             vector<double> t_candidates(nCandidates), weights(nCandidates);
             double weight_sum=0;
@@ -273,7 +273,7 @@ public:
                 if(r<=cumsum) break;
             }
             double t_sampled = t_candidates[min(pick_idx,nCandidates-1)];
-            cosT = std::clamp(1.0 - 2.0*(t_sampled-t_min)/(t_max-t_min), -1.0, 1.0);
+            cosT = std::clamp(1 - 2.0*(t_sampled-t_min)/(t_max-t_min), -1.0, 1.0);
         } else {
             cosT = rnd.Uniform(-1.0,1.0);
         }
@@ -306,6 +306,7 @@ double getMass(int pdg) {
     if (pdg == -321) return PDG::Kp;
     if (pdg == 3312) return PDG::Xi;
     if (pdg == -3312) return PDG::Xi;
+    if (pdg == 2112) return PDG::neutron;
     if (pdg == 9999) return 2.5; // Example for intermediate state
     // Add more as needed
     return 0.0;
@@ -348,6 +349,15 @@ std::vector<int> getFirstDecayDaughters(const std::string& reaction) {
     return pdgs;
 }
 
+double getReactionThreshold(const std::string& reaction) {
+    auto decay_map = parseDecayMap(reaction);
+    auto first_decay = getFirstDecayDaughters(reaction);
+    double threshold = 0.0;
+    for (int pdg : first_decay) {
+        threshold += getMass(pdg);
+    }
+    return threshold;
+}
 
 void runEventGenerator() {
     cout << "Reading input file..." << endl;
@@ -355,18 +365,18 @@ void runEventGenerator() {
 
     cout << "Initializing event generator..." << endl;
 
-    eventGenerator gen(input.num_events, input.beam_energy, input.target_mass);
+    eventGenerator gen(input.num_events, input.beam_energy, getMass(input.target_pid));
 
     TH1D *h_e_theta    = new TH1D("h_e_theta", "Scattered electron #theta; #theta [rad]; Counts", 100, 0.0, 180.0);
 
-    TLorentzVector p_target = TLorentzVector(0, 0, 0, input.target_mass);
+    TLorentzVector p_target = TLorentzVector(0, 0, 0, getMass(input.target_pid)); // Target at rest
     TLorentzVector p_beam = TLorentzVector(0, 0, input.beam_energy, input.beam_energy);
     auto electronEvents = gen.generateScatteredElectron(input.Q2_range, input.E_range, input.theta_range, input.W_min);
 
     cout << "Generated " << electronEvents.v_scattered.size() << " events passing W_min = " << input.W_min << endl;
 
-    TH1D *h_t_gamma_k1 = new TH1D("h_t_gamma_k1", "t: #gamma^{*} - p; t [GeV^{2}]; Counts", 100, 0, 6.0);
-    TH1D *h_t_p_X      = new TH1D("h_t_p_X",       "t: p_{t} - X; t [GeV^{2}]; Counts", 100, 0, 6.0);
+    TH1D *h_t_gamma_X = new TH1D("h_t_gamma_X", "t: #gamma^{*} - X; t [GeV^{2}]; Counts", 100, 0, 5);
+    TH1D *h_t_p_p1      = new TH1D("h_t_p_p1",       "t: p_{t} - p; t [GeV^{2}]; Counts", 100, 0, 5);
     TH1D *h_m_X        = new TH1D("h_m_X",         "Invariant Mass of X; M_{X} [GeV]; Counts", 100, 0, 6.0);
     TH1D *h_m_X_calc   = new TH1D("h_m_X_calc",    "Calculated Invariant Mass of X from daughters; M_{X} [GeV]; Counts", 100, 0, 6.0);
 
@@ -375,7 +385,6 @@ void runEventGenerator() {
     // Parse the decay map from the reaction string in your input file
     auto parents = getFirstDecayDaughters(input.reaction);
 
-    
     auto decay_map = parseDecayMap(input.reaction);
     cout << "Decay: W -> ";
     for (size_t i = 0; i < parents.size(); ++i) {
@@ -384,7 +393,7 @@ void runEventGenerator() {
                 cout << " + ";
             }
             cout << endl;
-    // cout << decay_map.size() << " decay entries parsed from reaction string." << endl;
+            
     for (const auto& entry : decay_map) {
         cout << "Decay: " << entry.first << " -> ";
         for (size_t i = 0; i < entry.second.size(); ++i) {
@@ -393,6 +402,12 @@ void runEventGenerator() {
                 cout << " + ";
             }
             cout << endl;
+    }
+    double threshold = getReactionThreshold(input.reaction);
+    cout << "Reaction threshold: " << threshold << " GeV" << endl;
+    if (input.W_min < threshold) {
+        cout << "WARNING: W_min < reaction threshold. No events will be generated." << endl;
+        return;
     }
     std::vector<std::vector<std::pair<int, TLorentzVector>>> all_final_particles;
     std::vector<double> all_t_max;
@@ -417,11 +432,16 @@ void runEventGenerator() {
         // double mass_X = mass_func->GetRandom();
 
         // First decay: W -> pdg1 + pdg2
-        auto decay1 = gen.twoBodyDecayWeighted(electronEvents.v_W[i], m1, m2, input.t_slope, electronEvents.v_virtual[i]);
-        TLorentzVector p1_lab = decay1.d1_lab;
-        TLorentzVector p2_lab = decay1.d2_lab;
+        // Obtain decay products in lab frame
+        // for t slope weighting, make sure the particle on the meson vertex is the one we pass in as m1
+        // (e.g. if reaction is 2212, 9999: 9999, 321, 3312, then m1 = m_K, m2 = m_Xi)
+        // and t is calculated as t = (p_virtual - p_m2)^2 if m2 is the particle on the meson vertex
+        auto decay1 = gen.twoBodyDecayWeighted(electronEvents.v_W[i], m2, m1, input.t_slope, electronEvents.v_virtual[i]);
+        TLorentzVector p1_lab = decay1.d2_lab;
+        TLorentzVector p2_lab = decay1.d1_lab;
         double t_max = decay1.t_max;
         double t_min = decay1.t_min;
+
 
         // Recursively decay both daughters
         performDecay(p1_lab, pdg1, decay_map, gen, final_particles, electronEvents.v_virtual[i], 0);
@@ -502,9 +522,11 @@ void runEventGenerator() {
             TLorentzVector p_p1 = all_final_particles[i][0].second; // First particle from W decay
             TLorentzVector p_p2 = all_final_particles[i][1].second; // First particle from X decay
             TLorentzVector p_pbar = all_final_particles[i][2].second; // Second particle from X decay
-            TLorentzVector p_X = p_p2 + p_pbar; // Assuming X decays to p1, p2, pbar
-            double t_p_X = invariantSquare(p_proton, p_X, false);
-            double t_gamma_p1 = invariantSquare(p_virtual, p_p1, false);
+            TLorentzVector p_X = p_p2 + p_pbar; // Assuming X decays to p2, pbar
+            double t_gamma_X = invariantSquare(p_virtual, p_X, false);
+            double t_p_p1 = invariantSquare(p_target, p_p1, false);
+            double u_gamma_p1 = invariantSquare(p_virtual, p_p1, false);
+            double u_p_X = invariantSquare(p_target, p_X, false);
             double m_X = p_X.M();
             double m_X_calc = (p_p2 + p_pbar).M();
             double t_max = all_t_max[i];
@@ -512,8 +534,14 @@ void runEventGenerator() {
 
             h_m_X->Fill(m_X);
             h_m_X_calc->Fill(m_X_calc);
-            h_t_p_X->Fill(-(t_p_X - t_max));
-            h_t_gamma_k1->Fill(-(t_gamma_p1 - t_max));
+            h_t_p_p1->Fill(-(t_p_p1 - t_min));
+            h_t_gamma_X->Fill(-(t_gamma_X - t_min));
+
+            if (input.print_debug) {
+                cout << "Event " << i+1 << ": t_gamma_X = " << t_gamma_X << ", t_p_p1 = " << t_p_p1 << ", m_X = " << m_X << ", m_X_calc = " << m_X_calc << endl;
+                cout << "  t_min = " << t_min << ", t_max = " << t_max << endl;
+                cout << "  u_gamma_p1 = " << u_gamma_p1 << ", u_p_X = " << u_p_X << endl;
+            }
 
         }
 
@@ -524,31 +552,31 @@ void runEventGenerator() {
         // delete c1;
 
         TCanvas *c2 = new TCanvas("c2", "Momentum Transfer", 800, 600);
-        TF1 *fit_t = new TF1("fit_t", "[0]*exp(-[1]*x)", 0, 6.0);
+        TF1 *fit_t = new TF1("fit_t", "[0]*exp(-[1]*x)", 0., 6.0);
         fit_t->SetParameters(1.0, 1.0);
-        h_t_gamma_k1->SetLineColor(kRed);
+        h_t_gamma_X->SetLineColor(kRed);
         // h_t_gamma_k1->SetLineStyle(2);
-        h_t_gamma_k1->SetFillStyle(3001);
-        h_t_gamma_k1->SetFillColor(kRed);
-        h_t_gamma_k1->Draw();
-        h_t_gamma_k1->Fit(fit_t, "R");
+        h_t_gamma_X->SetFillStyle(3001);
+        h_t_gamma_X->SetFillColor(kRed);
+        h_t_gamma_X->Draw();
+        h_t_gamma_X->Fit(fit_t, "R");
         fit_t->SetLineColor(kBlue);
         fit_t->Draw("SAME");
         TLegend *leg = new TLegend(0.6, 0.7, 0.9, 0.9);
-        leg->AddEntry(h_t_gamma_k1, "Data", "lep");
-        leg->AddEntry(h_t_p_X, "Data", "lep");
+        leg->AddEntry(h_t_gamma_X, "t(#gamma^{*} - X)", "lep");
+        leg->AddEntry(h_t_p_p1, "t(p_{t} - p)", "lep");
 
         leg->AddEntry(fit_t, TString::Format("Fit: B=%.3f±%.3f",
                                     fit_t->GetParameter(1), fit_t->GetParError(1)), "l");
         // leg->AddEntry(fit_t, oss.str().c_str(), "l");
         leg->Draw();
-        h_t_gamma_k1->SetStats(0);
-        h_t_p_X->SetStats(0);
+        h_t_gamma_X->SetStats(0);
+        h_t_p_p1->SetStats(0);
         c2->Update();
 
         // c2->cd(2);
-        
-        h_t_p_X->Draw("SAMEE");
+
+        h_t_p_p1->Draw("SAMEE");
         // c2->SaveAs("momentum_transfer.png");
         // delete c2;
 
