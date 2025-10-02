@@ -507,7 +507,7 @@ void runEventGenerator_v2() {
 
                 }
                 
-                fout2 << "\n";
+               
             }
             fout2.close();
             cout << "Written events.lund" << endl;
