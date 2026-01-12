@@ -308,6 +308,7 @@ double getMass(int pdg) {
     if (pdg == -3312) return PDG::Xi;
     if (pdg == 2112) return PDG::neutron;
     if (pdg == 9999) return 2.5; // Example for intermediate state
+    if (pdg==9998) return 1.232; // Delta
     // Add more as needed
     return 0.0;
 }
@@ -379,6 +380,7 @@ void runEventGenerator() {
     TH1D *h_t_p_p1      = new TH1D("h_t_p_p1",       "t: p_{t} - p; t [GeV^{2}]; Counts", 100, 0, 5);
     TH1D *h_m_X        = new TH1D("h_m_X",         "Invariant Mass of X; M_{X} [GeV]; Counts", 100, 0, 6.0);
     TH1D *h_m_X_calc   = new TH1D("h_m_X_calc",    "Calculated Invariant Mass of X from daughters; M_{X} [GeV]; Counts", 100, 0, 6.0);
+    TH1D *h_W          = new TH1D("h_W",           "Invariant Mass W; W [GeV]; Counts", 100, 0, 6.0);
 
     cout << "Processing decays..." << endl;
 
@@ -428,7 +430,7 @@ void runEventGenerator() {
         double m1 = getMass(pdg1);
         double m2 = getMass(pdg2);
 
-        // TF1 *mass_func = new TF1("mass_X_func", input.mass_X.c_str(), 0, (p_beam + p_target).M());
+        // TF1 *mass_func = new TF1("mass_X_func", "TMath::Landau(x, 2, 0.1)", 0, (p_beam + p_target).M());
         // double mass_X = mass_func->GetRandom();
 
         // First decay: W -> pdg1 + pdg2
@@ -478,9 +480,9 @@ void runEventGenerator() {
     // Write to LUND file as necessary...
     if (input.write_lund) {
         cout << "Creating LUND file..." << endl;
-        ofstream fout2("events.lund");
+        ofstream fout2("events_signal.lund");
         if (!fout2.is_open()) {
-            cerr << "ERROR: cannot open events.lund for writing." << endl;
+            cerr << "ERROR: cannot open events_signal.lund for writing." << endl;
         } else {
             int nEvents = (int)electronEvents.v_W.size();
             for (int i=0;i<nEvents;++i) {
@@ -536,6 +538,7 @@ void runEventGenerator() {
             h_m_X_calc->Fill(m_X_calc);
             h_t_p_p1->Fill(-(t_p_p1 - t_min));
             h_t_gamma_X->Fill(-(t_gamma_X - t_min));
+            h_W->Fill(p_W.M());
 
             if (input.print_debug) {
                 cout << "Event " << i+1 << ": t_gamma_X = " << t_gamma_X << ", t_p_p1 = " << t_p_p1 << ", m_X = " << m_X << ", m_X_calc = " << m_X_calc << endl;
@@ -590,6 +593,9 @@ void runEventGenerator() {
         h_m_X_calc->SetFillStyle(3001);        
         h_m_X_calc->Draw();
         h_m_X->Draw("SAMEE");
+
+        TCanvas *c4 = new TCanvas("c4", "Invariant Mass W", 800, 600);
+        h_W->Draw();
 
     }
     cout << "Event generation complete." << endl;
