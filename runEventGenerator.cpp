@@ -671,6 +671,11 @@ void runEventGenerator() {
                      "M(pipi); Mass [GeV]; Counts",
                      100, 1.5, 3.5);
 
+    TH1D *h_p_p = new TH1D("h_p_p",
+        "Momentum Magnitude Distribiution of Proton 1; p [Gev]; Counts",
+        100, 0.0, 8.0);
+
+
     TLorentzVector p_target(0,0,0,target_mass);
     TLorentzVector p_beam(0,0,input.beam_energy,input.beam_energy);
 
@@ -768,6 +773,11 @@ void runEventGenerator() {
             if (pr.first ==  2212)  protons.push_back(pr.second);
             if (pr.first == -2212)  pbars.push_back(pr.second);
         }
+        
+        for (const auto &p : protons) {
+            double p_mag_proton = p.P();
+            h_p_p ->Fill(p_mag_proton);
+        }
 
         // Reconstruct: choose (p + pbar) combo closest to truth mX
         if (!protons.empty() && !pbars.empty()) {
@@ -849,23 +859,32 @@ void runEventGenerator() {
     // -----------------------------------------------------
     // Simple plots, if requested
     // -----------------------------------------------------
+
     if (input.gen_plots) {
         for (const auto& e : electronEvents.v_scattered) {
             h_e_theta->Fill(e.Theta() * TMath::RadToDeg());
         }
 
         cout << "Generating plots..." << endl;
+
+        // Tcanvas *c# = new Tcanvas("c#", "Title", pixelsize(x, y));
+        // name of kinematical information in ROOT index form->Draw();
+
         TCanvas *c1 = new TCanvas("c1", "Scattered Electron Theta", 800, 600);
         h_e_theta->Draw();
 
         TCanvas *c2 = new TCanvas("c2", "Invariant Mass W", 800, 600);
         h_W->Draw();
-
+ 
         TCanvas *c3 = new TCanvas("c3", "All Plots", 800, 600);
         h_X->SetLineColor(kRed);
         h_X->Draw();
         h_int->Draw("SAMEE");
+
+        TCanvas *c4 = new TCanvas("c4", "|P_p|", 800, 600);
+        h_p_p->Draw();
+
     }
 
     cout << "Event generation complete." << endl;
-}
+} // end of runEventGenerator class
