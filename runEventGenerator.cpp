@@ -1,3 +1,4 @@
+#include <limits>
 #include <TROOT.h>
 #include <TFile.h>
 #include <TTree.h>
@@ -136,7 +137,6 @@ double getMassSampled(int pdg, TRandom3 &rnd,
     return 0.0; // caller should treat as failure and skip event
 }
 
-
 double parentDecayThreshold(int parent_pdg,
                             const std::map<int, std::vector<int>>& decay_map)
 {
@@ -148,7 +148,6 @@ double parentDecayThreshold(int parent_pdg,
     return thr;
 }
 
-
 bool sampleIntermediateAboveThreshold(int pdg,
                                       TRandom3& rnd,
                                       const std::map<int, std::vector<int>>& decay_map,
@@ -159,9 +158,9 @@ bool sampleIntermediateAboveThreshold(int pdg,
     double thr = parentDecayThreshold(pdg, decay_map);
 
     for (int i = 0; i < max_tries; ++i) {
-        double m = getMassSampled(pdg, rnd); 
+        double m = getMassSampled(pdg, rnd);
         if (!std::isfinite(m) || m <= 0.0) continue;
-        if (m < thr) continue;               
+        if (m < thr) continue;
         m_out = m;
         return true;
     }
@@ -209,6 +208,19 @@ double twoBodyMomentum(double M, double m1, double m2) {
 double invariantSquare(const TLorentzVector &a, const TLorentzVector &b, bool use_sum=false) {
     TLorentzVector d = use_sum ? (a+b) : (a-b);
     return d.M2();
+}
+
+// ---------------------------------------------------------
+// 4-vector sanity helpers (NEW)
+// ---------------------------------------------------------
+static inline bool finite4(const TLorentzVector& v) {
+    return std::isfinite(v.Px()) && std::isfinite(v.Py()) &&
+           std::isfinite(v.Pz()) && std::isfinite(v.E());
+}
+
+static inline bool nonzeroP(const TLorentzVector& v, double eps=1e-12) {
+    const double p2 = v.Px()*v.Px() + v.Py()*v.Py() + v.Pz()*v.Pz();
+    return p2 > eps;
 }
 
 // ---------------------------------------------------------
@@ -586,49 +598,75 @@ public:
 };
 
 // ---------------------------------------------------------
-// Recursive decay
+// Recursive decay (CHANGED: returns bool and validates)
 // ---------------------------------------------------------
-void performDecay(const TLorentzVector& parent_lab, int parent_pdg,
+bool performDecay(const TLorentzVector& parent_lab, int parent_pdg,
                   const std::map<int, std::vector<int>>& decay_map,
                   eventGenerator& gen,
                   std::vector<std::pair<int, TLorentzVector>>& final_particles,
                   const TLorentzVector& p_virtual_lab,
                   double t_slope_for_this_vertex)
 {
+    // Reject invalid/placeholder parents (prevents (0,0,0,0) from being saved)
+    if (!finite4(parent_lab)) return false;
+    if (parent_lab.E() <= 0.0) return false;
+    if (parent_lab.M2() < -1e-6) return false;
+
     auto it = decay_map.find(parent_pdg);
     if (it == decay_map.end()) {
-        // Stable particle
+        // Stable particle: require nonzero momentum (except photons)
+        if (parent_pdg != 22 && !nonzeroP(parent_lab)) return false;
         final_particles.emplace_back(parent_pdg, parent_lab);
-        return;
+        return true;
     }
 
     const std::vector<int>& daughters = it->second;
+
     if (daughters.size() == 2) {
         double m1 = getMass(daughters[0]);
         double m2 = getMass(daughters[1]);
+        if (m1 <= 0.0 || m2 <= 0.0) return false;
+
         auto decay = gen.twoBodyDecayWeighted(parent_lab, m1, m2,
                                               t_slope_for_this_vertex,
                                               p_virtual_lab);
-        performDecay(decay.d1_lab, daughters[0], decay_map, gen,
-                     final_particles, p_virtual_lab, 0.0);
-        performDecay(decay.d2_lab, daughters[1], decay_map, gen,
-                     final_particles, p_virtual_lab, 0.0);
+
+        // twoBodyDecayWeighted signals failure via NaNs / zero vector
+        if (!finite4(decay.d1_lab) || !finite4(decay.d2_lab)) return false;
+        if (decay.d1_lab.E() <= 0.0 || decay.d2_lab.E() <= 0.0) return false;
+
+        if (!performDecay(decay.d1_lab, daughters[0], decay_map, gen,
+                          final_particles, p_virtual_lab, 0.0)) return false;
+
+        if (!performDecay(decay.d2_lab, daughters[1], decay_map, gen,
+                          final_particles, p_virtual_lab, 0.0)) return false;
+
+        return true;
+
     } else if (daughters.size() == 3) {
         double m1 = getMass(daughters[0]);
         double m2 = getMass(daughters[1]);
         double m3 = getMass(daughters[2]);
+        if (m1 <= 0.0 || m2 <= 0.0 || m3 <= 0.0) return false;
+
         auto outs = gen.threeBodyDecay(parent_lab, m1, m2, m3);
-        if (outs.size() != 3) return; // kinematically invalid, skip
+        if (outs.size() != 3) return false; // kinematically invalid => fail event
 
         for (int i=0; i<3; ++i) {
-            performDecay(outs[i], daughters[i], decay_map, gen,
-                         final_particles, p_virtual_lab, 0.0);
+            if (!finite4(outs[i]) || outs[i].E() <= 0.0) return false;
         }
+
+        for (int i=0; i<3; ++i) {
+            if (!performDecay(outs[i], daughters[i], decay_map, gen,
+                              final_particles, p_virtual_lab, 0.0)) return false;
+        }
+        return true;
+
     } else {
-        // For >3-body: could be extended with TGenPhaseSpace and N masses
         cerr << "WARNING: N-body decays with N=" << daughters.size()
              << " not implemented (parent=" << parent_pdg << ")\n";
-        final_particles.emplace_back(parent_pdg, parent_lab);
+        // Treat as failure rather than writing garbage
+        return false;
     }
 }
 
@@ -636,7 +674,6 @@ void performDecay(const TLorentzVector& parent_lab, int parent_pdg,
 // Main event-generation driver
 // ---------------------------------------------------------
 void runEventGenerator() {
-    // cout << "Reading input file: " << inputFile << endl;
     auto input = readInputFile("input.txt");
 
     if (input.num_events <= 0) {
@@ -668,7 +705,7 @@ void runEventGenerator() {
                      100, 1.5, 3.5);
 
     TH1D *h_int = new TH1D("h_int",
-                     "M(pipi); Mass [GeV]; Counts",
+                     "M(p pbar); Mass [GeV]; Counts",
                      100, 1.5, 3.5);
 
     TLorentzVector p_target(0,0,0,target_mass);
@@ -732,9 +769,8 @@ void runEventGenerator() {
         }
 
         // W -> pdg1 + pdg2
-        // We want t-slope weighting on the gamma* - "meson" leg, so
-        // we can choose which one gets the weighting. Here we assume
-        // pdg2 is the "X" or meson-like object.
+        // We want t-slope weighting on the gamma* - "meson" leg.
+        // Here we assume pdg2 is the "X" or meson-like object.
         auto decay1 = gen.twoBodyDecayWeighted(electronEvents.v_W[i],
                                                m2, m1,
                                                input.t_slope,
@@ -742,17 +778,31 @@ void runEventGenerator() {
 
         TLorentzVector p1_lab = decay1.d2_lab; // corresponds to m1
         TLorentzVector p2_lab = decay1.d1_lab; // corresponds to m2
-        
+
         // Recursively decay both daughters (no further t-slope)
-        performDecay(p1_lab, pdg1, decay_map, gen, final_particles,
-                     electronEvents.v_virtual[i], 0.0);
-        performDecay(p2_lab, pdg2, decay_map, gen, final_particles,
-                     electronEvents.v_virtual[i], 0.0);
+        bool ok = true;
+        ok &= performDecay(p1_lab, pdg1, decay_map, gen, final_particles,
+                           electronEvents.v_virtual[i], 0.0);
+        ok &= performDecay(p2_lab, pdg2, decay_map, gen, final_particles,
+                           electronEvents.v_virtual[i], 0.0);
 
-        
+        if (!ok) continue; // reject unphysical/failed decays
 
-        // Add scattered electron as final state
+        // Add scattered electron as final state (sanity-check it)
+        if (!finite4(electronEvents.v_scattered[i])) continue;
+        if (electronEvents.v_scattered[i].E() <= 0.0) continue;
+        if (!nonzeroP(electronEvents.v_scattered[i])) continue;
         final_particles.emplace_back(11, electronEvents.v_scattered[i]);
+
+        // Final pass: no zero-momentum tracks (except photons if any)
+        for (const auto& pr : final_particles) {
+            const int pid = pr.first;
+            const auto& v = pr.second;
+            if (!finite4(v) || v.E() <= 0.0) { ok = false; break; }
+            if (pid != 22 && !nonzeroP(v))   { ok = false; break; }
+        }
+        if (!ok) continue;
+
         all_final_particles.push_back(final_particles);
 
         // Truth X 4-vector from the first vertex (you already have it):
@@ -815,13 +865,23 @@ void runEventGenerator() {
     // -----------------------------------------------------
     if (input.write_lund) {
         cout << "Creating LUND file..." << endl;
-        ofstream fout("events_back_p_pipi.lund");
+        ofstream fout("events.lund");
         if (!fout.is_open()) {
             cerr << "ERROR: cannot open events_signal.lund for writing." << endl;
         } else {
             int nEvents = (int)all_final_particles.size();
             for (int i=0; i<nEvents; ++i) {
-                int num_particles = all_final_particles[i].size();
+                // Belt + suspenders: skip any event that still contains junk
+                bool event_ok = true;
+                for (const auto& pr : all_final_particles[i]) {
+                    const int pid = pr.first;
+                    const auto& v = pr.second;
+                    if (!finite4(v) || v.E() <= 0.0) { event_ok = false; break; }
+                    if (pid != 22 && !nonzeroP(v))   { event_ok = false; break; }
+                }
+                if (!event_ok) continue;
+
+                int num_particles = (int)all_final_particles[i].size();
                 fout << "\t" << num_particles
                      << " 1 1 0 0 11 " << input.beam_energy
                      << " 2212 " << PDG::proton << " 0\n";

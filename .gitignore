@@ -4,3 +4,12 @@
 .DS_Store
 *.pdf
 *.lund
+*.log
+*.out
+*.err
+*.aux
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.py
