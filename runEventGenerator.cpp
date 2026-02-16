@@ -673,7 +673,7 @@ bool performDecay(const TLorentzVector& parent_lab, int parent_pdg,
 // ---------------------------------------------------------
 // Main event-generation driver
 // ---------------------------------------------------------
-void runEventGenerator() {
+void runEventGenerator(const std::string& lund_filename = "events.lund") {
     auto input = readInputFile("input.txt");
 
     if (input.num_events <= 0) {
@@ -865,9 +865,9 @@ void runEventGenerator() {
     // -----------------------------------------------------
     if (input.write_lund) {
         cout << "Creating LUND file..." << endl;
-        ofstream fout("events.lund");
+        ofstream fout(lund_filename);
         if (!fout.is_open()) {
-            cerr << "ERROR: cannot open events_signal.lund for writing." << endl;
+            cerr << "ERROR: cannot open " << lund_filename << " for writing." << endl;
         } else {
             int nEvents = (int)all_final_particles.size();
             for (int i=0; i<nEvents; ++i) {
@@ -901,7 +901,7 @@ void runEventGenerator() {
                 }
             }
             fout.close();
-            cout << "Written events.lund" << endl;
+            cout << "Written " << lund_filename << endl;
         }
     } else {
         cout << "Skipping LUND file creation." << endl;
@@ -930,3 +930,4 @@ void runEventGenerator() {
 
     cout << "Event generation complete." << endl;
 }
+
