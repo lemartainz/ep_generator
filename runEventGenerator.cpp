@@ -883,21 +883,22 @@ void runEventGenerator() {
 
                 int num_particles = (int)all_final_particles[i].size();
                 fout << "\t" << num_particles
-                     << " 1 1 0 0 11 " << input.beam_energy
-                     << " 2212 " << PDG::proton << " 0\n";
-
+                     << " " << 1 << " " << 1 << " " << 0. << " " << 0 << " " << 11 << " " << input.beam_energy
+                     << " " << 2212 << " " << PDG::proton << " " << "0\n";
+	
+		double vx_rand = gen.rnd.Uniform(-0.2, 0.2);
+		double vy_rand = gen.rnd.Uniform(-0.2, 0.2);
                 double vz_rand = gen.rnd.Uniform(-5.0, 0.0);
 
                 for (size_t j=0; j<all_final_particles[i].size(); ++j) {
                     int pid = all_final_particles[i][j].first;
                     TLorentzVector &v = all_final_particles[i][j].second;
                     fout << j+1 << " "
-                         << 0 << " " << 1 << " " << pid << " 0 0 "
+                         << 0 << " " << 1 << " " << pid << " " << 0 << " " << 0 << " " 
                          << std::fixed << std::setprecision(6)
                          << v.Px() << " " << v.Py() << " " << v.Pz() << " " << v.E() << " "
-                         << getMass(pid) << " " << vz_rand << " " << 0.0 << "\n";
+                         << getMass(pid) << " " << vx_rand << " " << vy_rand << " " << vz_rand << "\n";
                 }
-                fout << "\n";
             }
             fout.close();
             cout << "Written events.lund" << endl;

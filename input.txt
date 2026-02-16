@@ -6,9 +6,9 @@ target_pid:     2212
 theta_range:    0 5
 E_range:        0 6
 Q2_range:       0 6
-t_slope:        0
+t_slope:        4
 print_debug:    0
 write_lund:     1
-gen_plots:      1
+gen_plots:      0
 reaction:       2212, 9999: 9999, 2212, -2212
 mass_9999: BW 2. 0.4
