@@ -3,6 +3,8 @@
 #include <TFile.h>
 #include <TTree.h>
 #include <TH1D.h>
+#include <TH3D.h>
+#include <TH2D.h>
 #include <TCanvas.h>
 #include <TF1.h>
 #include <TLorentzVector.h>
@@ -189,6 +191,19 @@ struct ReadInput {
     bool print_debug      = false;
     bool write_lund       = true;
     bool gen_plots        = false;
+    // Data-driven sampling (optional): a ROOT file containing a TH3D
+    // with axes (Q2 [GeV^2], E' [GeV], theta_e [deg]) built from real data.
+    // If set, the generator samples (Q2, E', theta_e) from this TH3D via
+    // TH3::GetRandom3 instead of the uniform Q2/E/theta ranges above.
+    std::string data_hist_file;
+    std::string data_hist_name = "h_data";
+    // Continuous weight function w(Q2, E') derived from real data.
+    // A TH2D stored in a ROOT file; the generator evaluates it with
+    // TH2::Interpolate (bilinear -> continuous) and uses the value as
+    // an accept-reject probability on top of uniform Q2/E' sampling.
+    // Expected to be normalized so that max(w) = 1.
+    std::string weight_func_file;
+    std::string weight_func_name = "w_Q2_Ep";
 };
 
 // Two-body decay result
@@ -284,6 +299,18 @@ ReadInput readInputFile(const string &filename) {
         } else if (key == "gen_plots") {
             std::string val; iss >> val;
             input.gen_plots = (val == "true" || val == "1");
+        } else if (key == "weight_func") {
+            // weight_func: path/to/file.root  [hist_name]
+            std::string fname, hname;
+            iss >> fname;
+            if (iss >> hname) input.weight_func_name = hname;
+            input.weight_func_file = fname;
+        } else if (key == "data_hist") {
+            // data_hist: path/to/file.root  [hist_name]
+            std::string fname, hname;
+            iss >> fname;
+            if (iss >> hname) input.data_hist_name = hname;
+            input.data_hist_file = fname;
         } else if (key.rfind("mass_",0) == 0) {
             // Supports:
             //   mass_<pdg>: <number>
@@ -463,22 +490,58 @@ public:
     ElectroProduction generateScatteredElectron(const Range &Q2_range,
                                                 const Range &E_range,
                                                 const Range &theta_range,
-                                                double W_min) {
+                                                double W_min,
+                                                TH3D *data_hist = nullptr,
+                                                TH2D *weight_func = nullptr) {
         ElectroProduction event;
         event.p_beam   = TLorentzVector(0,0,beam_energy, beam_energy);
         event.p_target = TLorentzVector(0,0,0,target_mass);
 
         while (event.v_scattered.size() < (size_t)num_events) {
-            double Q2 = Q2_range.sample(rnd);
-            double E_scattered = E_range.sample(rnd);
+            double Q2, E_scattered, theta;
 
-            double arg = 1.0 - Q2/(2.0*beam_energy*E_scattered);
-            if (!isfinite(arg) || arg < -1.0 || arg > 1.0) continue;
+            if (data_hist) {
+                // Data-driven sampling: TH3D axes = (Q2, E', theta_e[deg])
+                double Q2_s, E_s, theta_deg;
+                data_hist->GetRandom3(Q2_s, E_s, theta_deg);
+                Q2          = Q2_s;
+                E_scattered = E_s;
+                theta       = theta_deg * TMath::DegToRad();
 
-            double theta = acos(arg);
+                // consistency check: kinematically allowed?
+                double arg = 1.0 - Q2/(2.0*beam_energy*E_scattered);
+                if (!isfinite(arg) || arg < -1.0 || arg > 1.0) continue;
+            } else {
+                Q2 = Q2_range.sample(rnd);
+                E_scattered = E_range.sample(rnd);
 
-            if (theta < theta_range.min || theta > theta_range.max)
-                continue;
+                double arg = 1.0 - Q2/(2.0*beam_energy*E_scattered);
+                if (!isfinite(arg) || arg < -1.0 || arg > 1.0) continue;
+
+                theta = acos(arg);
+
+                if (theta < theta_range.min || theta > theta_range.max)
+                    continue;
+
+                // Continuous data-driven weighting via interpolation.
+                // weight_func is a TH2D of the real-data (Q2, E') density,
+                // normalized so max=1. TH2::Interpolate does bilinear
+                // interpolation between bin centers -> a smooth w(Q2,E').
+                if (weight_func) {
+                    // clamp to the histogram's interior, otherwise
+                    // Interpolate returns 0 at the boundary
+                    double q2_lo = weight_func->GetXaxis()->GetXmin();
+                    double q2_hi = weight_func->GetXaxis()->GetXmax();
+                    double e_lo  = weight_func->GetYaxis()->GetXmin();
+                    double e_hi  = weight_func->GetYaxis()->GetXmax();
+                    if (Q2 <= q2_lo || Q2 >= q2_hi ||
+                        E_scattered <= e_lo || E_scattered >= e_hi) continue;
+
+                    double w = weight_func->Interpolate(Q2, E_scattered);
+                    if (!std::isfinite(w) || w <= 0.0) continue;
+                    if (rnd.Uniform() > w) continue; // accept-reject
+                }
+            }
 
             double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
 
@@ -498,6 +561,79 @@ public:
         }
 
         return event;
+    }
+
+    // Generate a single scattered electron event (for on-demand generation).
+    // Returns true if a valid event was produced, false otherwise.
+    bool generateOneElectron(const Range &Q2_range,
+                             const Range &E_range,
+                             const Range &theta_range,
+                             double W_min,
+                             TH3D *data_hist,
+                             TH2D *weight_func,
+                             TLorentzVector &p_scattered_out,
+                             TLorentzVector &p_virtual_out,
+                             TLorentzVector &p_W_out) {
+        TLorentzVector p_beam_loc(0,0,beam_energy, beam_energy);
+        TLorentzVector p_target_loc(0,0,0,target_mass);
+
+        // Try up to 100000 samplings to find one good electron
+        for (int attempt = 0; attempt < 100000; ++attempt) {
+            double Q2, E_scattered, theta;
+
+            if (data_hist) {
+                double Q2_s, E_s, theta_deg;
+                data_hist->GetRandom3(Q2_s, E_s, theta_deg);
+                Q2          = Q2_s;
+                E_scattered = E_s;
+                theta       = theta_deg * TMath::DegToRad();
+
+                double arg = 1.0 - Q2/(2.0*beam_energy*E_scattered);
+                if (!isfinite(arg) || arg < -1.0 || arg > 1.0) continue;
+            } else {
+                Q2 = Q2_range.sample(rnd);
+                E_scattered = E_range.sample(rnd);
+
+                double arg = 1.0 - Q2/(2.0*beam_energy*E_scattered);
+                if (!isfinite(arg) || arg < -1.0 || arg > 1.0) continue;
+
+                theta = acos(arg);
+
+                if (theta < theta_range.min || theta > theta_range.max)
+                    continue;
+
+                if (weight_func) {
+                    double q2_lo = weight_func->GetXaxis()->GetXmin();
+                    double q2_hi = weight_func->GetXaxis()->GetXmax();
+                    double e_lo  = weight_func->GetYaxis()->GetXmin();
+                    double e_hi  = weight_func->GetYaxis()->GetXmax();
+                    if (Q2 <= q2_lo || Q2 >= q2_hi ||
+                        E_scattered <= e_lo || E_scattered >= e_hi) continue;
+
+                    double w = weight_func->Interpolate(Q2, E_scattered);
+                    if (!std::isfinite(w) || w <= 0.0) continue;
+                    if (rnd.Uniform() > w) continue;
+                }
+            }
+
+            double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
+
+            TLorentzVector p_scattered(E_scattered*sin(theta)*cos(phi),
+                                       E_scattered*sin(theta)*sin(phi),
+                                       E_scattered*cos(theta),
+                                       E_scattered);
+
+            TLorentzVector p_virtual = p_beam_loc - p_scattered;
+            TLorentzVector p_W       = p_beam_loc + p_target_loc - p_scattered;
+
+            if (p_W.M() >= W_min) {
+                p_scattered_out = p_scattered;
+                p_virtual_out   = p_virtual;
+                p_W_out         = p_W;
+                return true;
+            }
+        }
+        return false; // could not generate after max attempts
     }
 
     // t-weighted 2-body decay in parent rest frame, boosted to lab
@@ -704,6 +840,17 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
                      "M(X); M_{X} [GeV]; Counts",
                      100, 1.5, 3.5);
 
+    // Weighted-variable histograms
+    TH1D *h_t   = new TH1D("h_t",
+                     "t - t_{min}; t - t_{min} [GeV^{2}]; Counts",
+                     200, -5.0, 5.0);
+    TH1D *h_Q2  = new TH1D("h_Q2",
+                     "Q^{2} distribution; Q^{2} [GeV^{2}]; Counts",
+                     200, 0.0, 12.0);
+    TH1D *h_Ep  = new TH1D("h_Ep",
+                     "Scattered electron energy; E' [GeV]; Counts",
+                     200, 0.0, 12.0);
+
     TH1D *h_int = new TH1D("h_int",
                      "M(p pbar); Mass [GeV]; Counts",
                      100, 1.5, 3.5);
@@ -711,13 +858,51 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
     TLorentzVector p_target(0,0,0,target_mass);
     TLorentzVector p_beam(0,0,input.beam_energy,input.beam_energy);
 
-    auto electronEvents = gen.generateScatteredElectron(input.Q2_range,
-                                                        input.E_range,
-                                                        input.theta_range,
-                                                        input.W_min);
+    // Optional data-driven sampling histogram
+    TH3D *data_hist = nullptr;
+    TFile *data_hist_tf = nullptr;
+    if (!input.data_hist_file.empty()) {
+        data_hist_tf = TFile::Open(input.data_hist_file.c_str(), "READ");
+        if (!data_hist_tf || data_hist_tf->IsZombie()) {
+            cerr << "ERROR: cannot open data_hist file "
+                 << input.data_hist_file << endl;
+        } else {
+            data_hist = dynamic_cast<TH3D*>(
+                data_hist_tf->Get(input.data_hist_name.c_str()));
+            if (!data_hist) {
+                cerr << "ERROR: TH3D '" << input.data_hist_name
+                     << "' not found in " << input.data_hist_file << endl;
+            } else {
+                cout << "Data-driven sampling enabled: "
+                     << input.data_hist_file << ":" << input.data_hist_name
+                     << "  (axes: Q2, E', theta_e[deg])" << endl;
+            }
+        }
+    }
 
-    cout << "Generated " << electronEvents.v_scattered.size()
-         << " events passing W_min = " << input.W_min << endl;
+    // Optional continuous weight function w(Q2, E') (data-driven reshaping
+    // of the uniform sampler via accept-reject).
+    TH2D *weight_func = nullptr;
+    TFile *weight_func_tf = nullptr;
+    if (!input.weight_func_file.empty()) {
+        weight_func_tf = TFile::Open(input.weight_func_file.c_str(), "READ");
+        if (!weight_func_tf || weight_func_tf->IsZombie()) {
+            cerr << "ERROR: cannot open weight_func file "
+                 << input.weight_func_file << endl;
+        } else {
+            weight_func = dynamic_cast<TH2D*>(
+                weight_func_tf->Get(input.weight_func_name.c_str()));
+            if (!weight_func) {
+                cerr << "ERROR: TH2D '" << input.weight_func_name
+                     << "' not found in " << input.weight_func_file << endl;
+            } else {
+                cout << "Continuous weight function enabled: "
+                     << input.weight_func_file << ":"
+                     << input.weight_func_name
+                     << "  (bilinear Interpolate on Q2, E')" << endl;
+            }
+        }
+    }
 
     // Parse reaction
     auto parents   = getFirstDecayDaughters(input.reaction);
@@ -739,6 +924,11 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         cout << endl;
     }
 
+    if (parents.size() != 2) {
+        cerr << "ERROR: Only two-body first decays W->d1+d2 are currently supported.\n";
+        return;
+    }
+
     double threshold = getFinalStateThreshold(input.reaction);
     cout << "Final-state threshold: " << threshold << " GeV\n";
     if (input.W_min < threshold) {
@@ -747,34 +937,53 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
     }
 
     std::vector<std::vector<std::pair<int, TLorentzVector>>> all_final_particles;
+    // Also store the scattered electron and W for each accepted event (for plots/debug)
+    std::vector<TLorentzVector> accepted_scattered;
+    std::vector<TLorentzVector> accepted_W;
 
-    // Loop over events
-    for (size_t i=0; i<electronEvents.v_W.size(); ++i) {
-        std::vector<std::pair<int, TLorentzVector>> final_particles;
+    // Rejection counters for diagnostics
+    long long n_attempts           = 0;
+    long long n_reject_electron    = 0;
+    long long n_reject_mass        = 0;
+    long long n_reject_decay       = 0;
+    long long n_reject_finalcheck  = 0;
 
-        auto first_decay = parents;
-        if (first_decay.size() != 2) {
-            cerr << "ERROR: Only two-body first decays W->d1+d2 are currently supported.\n";
-            return;
+    const int target_events = input.num_events;
+    const int progress_step = std::max(1, target_events / 10);
+
+    cout << "Generating " << target_events << " events (with retry on rejection)..." << endl;
+
+    // ---- Main generation loop: keep going until we have num_events good events ----
+    while ((int)all_final_particles.size() < target_events) {
+        ++n_attempts;
+
+        // Generate a single scattered electron
+        TLorentzVector v_scattered, v_virtual, v_W;
+        if (!gen.generateOneElectron(input.Q2_range, input.E_range,
+                                     input.theta_range, input.W_min,
+                                     data_hist, weight_func,
+                                     v_scattered, v_virtual, v_W)) {
+            ++n_reject_electron;
+            continue;
         }
 
-        int pdg1 = first_decay[0];
-        int pdg2 = first_decay[1];
+        std::vector<std::pair<int, TLorentzVector>> final_particles;
+
+        int pdg1 = parents[0];
+        int pdg2 = parents[1];
 
         double m1 = getMass(pdg1);
         double m2 = 0.0;
         if (!sampleIntermediateAboveThreshold(pdg2, gen.rnd, decay_map, m2)) {
-            // could not find a kinematically allowed intermediate mass
-            continue; // skip this event
+            ++n_reject_mass;
+            continue;
         }
 
         // W -> pdg1 + pdg2
         // We want t-slope weighting on the gamma* - "meson" leg.
         // Here we assume pdg2 is the "X" or meson-like object.
-        auto decay1 = gen.twoBodyDecayWeighted(electronEvents.v_W[i],
-                                               m2, m1,
-                                               input.t_slope,
-                                               electronEvents.v_virtual[i]);
+        auto decay1 = gen.twoBodyDecayWeighted(v_W, m2, m1,
+                                               input.t_slope, v_virtual);
 
         TLorentzVector p1_lab = decay1.d2_lab; // corresponds to m1
         TLorentzVector p2_lab = decay1.d1_lab; // corresponds to m2
@@ -782,17 +991,18 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         // Recursively decay both daughters (no further t-slope)
         bool ok = true;
         ok &= performDecay(p1_lab, pdg1, decay_map, gen, final_particles,
-                           electronEvents.v_virtual[i], 0.0);
+                           v_virtual, 0.0);
         ok &= performDecay(p2_lab, pdg2, decay_map, gen, final_particles,
-                           electronEvents.v_virtual[i], 0.0);
+                           v_virtual, 0.0);
 
-        if (!ok) continue; // reject unphysical/failed decays
+        if (!ok) { ++n_reject_decay; continue; }
 
         // Add scattered electron as final state (sanity-check it)
-        if (!finite4(electronEvents.v_scattered[i])) continue;
-        if (electronEvents.v_scattered[i].E() <= 0.0) continue;
-        if (!nonzeroP(electronEvents.v_scattered[i])) continue;
-        final_particles.emplace_back(11, electronEvents.v_scattered[i]);
+        if (!finite4(v_scattered) || v_scattered.E() <= 0.0 || !nonzeroP(v_scattered)) {
+            ++n_reject_finalcheck;
+            continue;
+        }
+        final_particles.emplace_back(11, v_scattered);
 
         // Final pass: no zero-momentum tracks (except photons if any)
         for (const auto& pr : final_particles) {
@@ -801,9 +1011,25 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
             if (!finite4(v) || v.E() <= 0.0) { ok = false; break; }
             if (pid != 22 && !nonzeroP(v))   { ok = false; break; }
         }
-        if (!ok) continue;
+        if (!ok) { ++n_reject_finalcheck; continue; }
 
         all_final_particles.push_back(final_particles);
+        accepted_scattered.push_back(v_scattered);
+        accepted_W.push_back(v_W);
+
+        // Fill weighted-variable histograms: t, Q2, E'
+        // t = (gamma* - meson)^2;  same convention as twoBodyDecayWeighted
+        // The weighting was exp(-B * |t - t_min|), so we histogram (t - t_min)
+        // which ranges from 0 (forward peak) to (t_max - t_min).
+        double t_val = invariantSquare(v_virtual, p2_lab, false); // (q - p_X)^2
+        double t_shifted = t_val - decay1.t_min; // >= 0, same variable as in the weighting
+        if (std::isfinite(t_shifted) && t_shifted >= 0.0) {
+            h_t->Fill(t_shifted);
+        }
+        double Q2_val = -v_virtual.M2();
+        if (std::isfinite(Q2_val)) h_Q2->Fill(Q2_val);
+        double Ep_val = v_scattered.E();
+        if (std::isfinite(Ep_val)) h_Ep->Fill(Ep_val);
 
         // Truth X 4-vector from the first vertex (you already have it):
         TLorentzVector X_lab = p2_lab;                  // X from W -> p + X
@@ -837,17 +1063,16 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
             }
         }
 
+        int n_accepted = (int)all_final_particles.size();
         if (input.gen_plots) {
-            h_e_theta->Fill(electronEvents.v_scattered[i].Theta() * TMath::RadToDeg());
-            h_W->Fill(electronEvents.v_W[i].M());
+            h_e_theta->Fill(v_scattered.Theta() * TMath::RadToDeg());
+            h_W->Fill(v_W.M());
         }
 
         if (input.print_debug) {
-            cout << "[DEBUG] Event " << i << ":\n";
-            cout << "  W: (" << electronEvents.v_W[i].Px() << ", "
-                              << electronEvents.v_W[i].Py() << ", "
-                              << electronEvents.v_W[i].Pz() << ", "
-                              << electronEvents.v_W[i].E()  << ")\n";
+            cout << "[DEBUG] Event " << n_accepted << " (attempt " << n_attempts << "):\n";
+            cout << "  W: (" << v_W.Px() << ", " << v_W.Py() << ", "
+                             << v_W.Pz() << ", " << v_W.E()  << ")\n";
             for (size_t j=0; j<final_particles.size(); ++j) {
                 cout << "  final[" << j << "]: PDG=" << final_particles[j].first
                      << " P=(" << final_particles[j].second.Px() << ", "
@@ -856,9 +1081,31 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
                      << final_particles[j].second.E()  << ")\n";
             }
         }
+
+        // Progress report
+        if (n_accepted % progress_step == 0) {
+            cout << "  Progress: " << n_accepted << " / " << target_events
+                 << " good events  (attempts: " << n_attempts << ")" << endl;
+        }
     }
 
-    cout << "Finished processing decays." << endl;
+    // Print rejection diagnostics
+    long long n_rejected_total = n_reject_electron + n_reject_mass
+                               + n_reject_decay + n_reject_finalcheck;
+    cout << "\nFinished processing decays." << endl;
+    cout << "  Requested events:         " << target_events << endl;
+    cout << "  Total attempts:           " << n_attempts << endl;
+    cout << "  Accepted events:          " << all_final_particles.size() << endl;
+    cout << "  Total rejected:           " << n_rejected_total << endl;
+    cout << "    - electron generation:  " << n_reject_electron << endl;
+    cout << "    - intermediate mass:    " << n_reject_mass << endl;
+    cout << "    - decay failures:       " << n_reject_decay << endl;
+    cout << "    - final-state checks:   " << n_reject_finalcheck << endl;
+    if (n_attempts > 0) {
+        cout << "  Acceptance rate:          "
+             << std::fixed << std::setprecision(2)
+             << 100.0 * all_final_particles.size() / n_attempts << "%" << endl;
+    }
 
     // -----------------------------------------------------
     // Write LUND file
@@ -870,6 +1117,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
             cerr << "ERROR: cannot open " << lund_filename << " for writing." << endl;
         } else {
             int nEvents = (int)all_final_particles.size();
+            int nWritten = 0;
             for (int i=0; i<nEvents; ++i) {
                 // Belt + suspenders: skip any event that still contains junk
                 bool event_ok = true;
@@ -880,6 +1128,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
                     if (pid != 22 && !nonzeroP(v))   { event_ok = false; break; }
                 }
                 if (!event_ok) continue;
+                ++nWritten;
 
                 int num_particles = (int)all_final_particles[i].size();
                 fout << "\t" << num_particles
@@ -901,7 +1150,11 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
                 }
             }
             fout.close();
-            cout << "Written " << lund_filename << endl;
+            cout << "Written " << nWritten << " events to " << lund_filename << endl;
+            if (nWritten != nEvents) {
+                cout << "WARNING: " << (nEvents - nWritten)
+                     << " events dropped at LUND writing stage (should not happen)." << endl;
+            }
         }
     } else {
         cout << "Skipping LUND file creation." << endl;
@@ -910,11 +1163,44 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
     // -----------------------------------------------------
     // Simple plots, if requested
     // -----------------------------------------------------
-    if (input.gen_plots) {
-        for (const auto& e : electronEvents.v_scattered) {
-            h_e_theta->Fill(e.Theta() * TMath::RadToDeg());
-        }
+    // -----------------------------------------------------
+    // Fit -t distribution with exp(-B * t') and compare to input
+    // (always do this if we have events, independent of gen_plots)
+    // -----------------------------------------------------
+    if (h_t->GetEntries() > 50) {
+        // Fit range: skip first bin (edge effects) up to where stats run out
+        double fit_lo = h_t->GetBinLowEdge(2);
+        double fit_hi = h_t->GetXaxis()->GetBinUpEdge(h_t->FindLastBinAbove(5));
+        if (fit_hi <= fit_lo) fit_hi = h_t->GetXaxis()->GetXmax();
 
+        TF1 *f_exp = new TF1("f_exp", "[0]*exp(-[1]*x)", fit_lo, fit_hi);
+        f_exp->SetParameters(h_t->GetMaximum(), input.t_slope);
+        f_exp->SetParNames("Norm", "B_fit");
+        h_t->Fit(f_exp, "RQ0"); // R=range, Q=quiet, 0=don't draw yet
+
+        double B_fit   = f_exp->GetParameter(1);
+        double B_err   = f_exp->GetParError(1);
+        double chi2ndf = (f_exp->GetNDF() > 0)
+                       ? f_exp->GetChisquare() / f_exp->GetNDF() : -1;
+
+        cout << "\n===== t-slope verification =====" << endl;
+        cout << "  Input  t_slope (B_in):  " << input.t_slope << " GeV^{-2}" << endl;
+        cout << "  Fitted t_slope (B_fit): " << std::fixed << std::setprecision(3)
+             << B_fit << " +/- " << B_err << " GeV^{-2}" << endl;
+        cout << "  chi2/ndf:               " << std::setprecision(2) << chi2ndf << endl;
+        double pull = (input.t_slope > 0)
+                    ? std::abs(B_fit - input.t_slope) / std::max(B_err, 1e-9)
+                    : 0.0;
+        if (pull < 3.0) {
+            cout << "  Status: PASS (|pull| = " << std::setprecision(1) << pull << ")" << endl;
+        } else {
+            cout << "  Status: ** FAIL ** (|pull| = " << std::setprecision(1) << pull
+                 << ", fitted slope disagrees with input)" << endl;
+        }
+        cout << "================================\n" << endl;
+    }
+
+    if (input.gen_plots) {
         cout << "Generating plots..." << endl;
         TCanvas *c1 = new TCanvas("c1", "Scattered Electron Theta", 800, 600);
         h_e_theta->Draw();
@@ -926,6 +1212,46 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         h_X->SetLineColor(kRed);
         h_X->Draw();
         h_int->Draw("SAMEE");
+
+        // -t distribution with exponential fit overlay
+        TCanvas *c4 = new TCanvas("c4", "-t Distribution", 800, 600);
+        gPad->SetLogy();
+        h_t->SetLineColor(kBlue);
+        h_t->SetLineWidth(2);
+        h_t->Draw();
+        // Re-draw the fit on top (get the function attached by Fit)
+        TF1 *f_drawn = h_t->GetFunction("f_exp");
+        if (f_drawn) {
+            f_drawn->SetLineColor(kRed);
+            f_drawn->SetLineWidth(2);
+            f_drawn->Draw("SAME");
+        }
+        // Add a legend with fit result
+        TLegend *leg_t = new TLegend(0.45, 0.70, 0.88, 0.88);
+        leg_t->AddEntry(h_t, "Generated t - t_{min}", "l");
+        if (f_drawn) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "Fit: exp(-B #upoint t'), B = %.2f #pm %.2f",
+                     f_drawn->GetParameter(1), f_drawn->GetParError(1));
+            leg_t->AddEntry(f_drawn, buf, "l");
+            snprintf(buf, sizeof(buf), "Input t_slope = %.2f", input.t_slope);
+            leg_t->AddEntry((TObject*)nullptr, buf, "");
+        }
+        leg_t->Draw();
+
+        // Q2 distribution
+        TCanvas *c5 = new TCanvas("c5", "Q2 Distribution", 800, 600);
+        gPad->SetLogy();
+        h_Q2->SetLineColor(kBlue);
+        h_Q2->SetLineWidth(2);
+        h_Q2->Draw();
+
+        // E' distribution
+        TCanvas *c6 = new TCanvas("c6", "Scattered Electron Energy", 800, 600);
+        h_Ep->SetLineColor(kBlue);
+        h_Ep->SetLineWidth(2);
+        h_Ep->Draw();
     }
 
     cout << "Event generation complete." << endl;
