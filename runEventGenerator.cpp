@@ -636,12 +636,12 @@ public:
         return false; // could not generate after max attempts
     }
 
-    // t-weighted 2-body decay in parent rest frame, boosted to lab
+    
     DecayResult twoBodyDecayWeighted(const TLorentzVector &parent_lab,
-                                     double m1, double m2,
-                                     double B,
-                                     const TLorentzVector &p_virtual_lab,
-                                     int nCandidates = 10000) {
+                                 double m1, double m2,
+                                 double B,
+                                 const TLorentzVector &p_virtual_lab,
+                                 int nCandidates = 10000) {
         double M = parent_lab.M();
         TLorentzVector nanv(0,0,0,0);
         if (M <= m1+m2) return {nanv,nanv,NAN,NAN};
@@ -649,21 +649,28 @@ public:
         double p_mag = twoBodyMomentum(M, m1, m2);
         if (!isfinite(p_mag)) return {nanv,nanv,NAN,NAN};
 
-        // t at cosTheta = ±1
-        TLorentzVector d1_plus;  // cosθ = +1
-        TLorentzVector d1_minus; // cosθ = -1
-        d1_plus.SetPxPyPzE(0,0, p_mag, sqrt(p_mag*p_mag + m1*m1));
-        d1_minus.SetPxPyPzE(0,0,-p_mag, sqrt(p_mag*p_mag + m1*m1));
-
         TVector3 boostToLab = parent_lab.BoostVector();
-        d1_plus.Boost(boostToLab);
-        d1_minus.Boost(boostToLab);
 
-        double t_plus  = invariantSquare(p_virtual_lab,d1_plus,false);
-        double t_minus = invariantSquare(p_virtual_lab,d1_minus,false);
+        // Get q direction in the W rest frame
+        TLorentzVector q_Wrest = p_virtual_lab;
+        q_Wrest.Boost(-boostToLab);
+        TVector3 q_dir = q_Wrest.Vect().Unit();
+        if (q_dir.Mag() < 1e-10) return {nanv,nanv,NAN,NAN};
 
-        double t_min = std::min(t_plus,t_minus);
-        double t_max = std::max(t_plus,t_minus);
+        // t at cosTheta = ±1 relative to q_dir
+        TLorentzVector d1_fwd_rest, d1_bwd_rest;
+        d1_fwd_rest.SetVectM( p_mag * q_dir, m1);
+        d1_bwd_rest.SetVectM(-p_mag * q_dir, m1);
+
+        TLorentzVector d1_fwd_lab = d1_fwd_rest;
+        TLorentzVector d1_bwd_lab = d1_bwd_rest;
+        d1_fwd_lab.Boost(boostToLab);
+        d1_bwd_lab.Boost(boostToLab);
+
+        double t_fwd = invariantSquare(p_virtual_lab, d1_fwd_lab, false); // t_0, forward
+        double t_bwd = invariantSquare(p_virtual_lab, d1_bwd_lab, false); // t_1, backward
+        double t_min = t_bwd;
+        double t_max = t_fwd;
 
         if (!isfinite(t_min) || !isfinite(t_max) || t_max <= t_min)
             return {nanv,nanv,NAN,NAN};
@@ -672,41 +679,39 @@ public:
         if (B > 0) {
             vector<double> t_candidates(nCandidates), weights(nCandidates);
             double weight_sum = 0.0;
-            for (int i=0; i<nCandidates; ++i) {
+            for (int i = 0; i < nCandidates; ++i) {
                 t_candidates[i] = rnd.Uniform(t_min, t_max);
-                weights[i]      = exp(-B * fabs(t_candidates[i] - t_min));
+                weights[i]      = exp(-B * (t_max - t_candidates[i])); // t' = t_0 - t, peaks at t_0
                 weight_sum     += weights[i];
             }
             for (auto &w : weights) w /= weight_sum;
 
-            double r = rnd.Uniform();
-            double cumsum = 0.0;
+            double r = rnd.Uniform(), cumsum = 0.0;
             int pick_idx = 0;
-            for (; pick_idx<nCandidates; ++pick_idx) {
+            for (; pick_idx < nCandidates; ++pick_idx) {
                 cumsum += weights[pick_idx];
                 if (r <= cumsum) break;
             }
             double t_sampled = t_candidates[std::min(pick_idx, nCandidates-1)];
 
-            // Map t_sampled linearly back to cosθ
-            double frac = (t_sampled - t_min) / (t_max - t_min); // 0→t_min,1→t_max
-            cosT = 1.0 - 2.0 * frac; // t_min -> cosT=1, t_max -> cosT=-1
-            cosT = std::clamp(cosT, -1.0, 1.0);
+            // t_max -> cosT=+1 (forward), t_min -> cosT=-1 (backward)
+            double frac = (t_sampled - t_min) / (t_max - t_min);
+            cosT = std::clamp(2.0 * frac - 1.0, -1.0, 1.0);
         } else {
-            cosT = rnd.Uniform(-1.0,1.0);
+            cosT = rnd.Uniform(-1.0, 1.0);
         }
 
-        double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
-        double sinT = sqrt(std::max(0.0,1.0 - cosT*cosT));
+        double phi  = rnd.Uniform(-TMath::Pi(), TMath::Pi());
+        double sinT = sqrt(std::max(0.0, 1.0 - cosT*cosT));
 
-        TLorentzVector d1_rest;
-        d1_rest.SetPxPyPzE(p_mag*sinT*cos(phi),
-                           p_mag*sinT*sin(phi),
-                           p_mag*cosT,
-                           sqrt(p_mag*p_mag + m1*m1));
-        TLorentzVector d2_rest(-d1_rest.Vect(), sqrt(p_mag*p_mag + m2*m2));
+        // Build orthonormal basis around q_dir
+        TVector3 perp1 = q_dir.Orthogonal().Unit();
+        TVector3 perp2 = q_dir.Cross(perp1).Unit();
+        TVector3 d1_vect = p_mag * (cosT * q_dir + sinT * (cos(phi)*perp1 + sin(phi)*perp2));
 
-        // boost to lab
+        TLorentzVector d1_rest, d2_rest;
+        d1_rest.SetVectM( d1_vect, m1);
+        d2_rest.SetVectM(-d1_vect, m2);
         d1_rest.Boost(boostToLab);
         d2_rest.Boost(boostToLab);
 
@@ -842,8 +847,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
 
     // Weighted-variable histograms
     TH1D *h_t   = new TH1D("h_t",
-                     "t - t_{min}; t - t_{min} [GeV^{2}]; Counts",
-                     200, -5.0, 5.0);
+                     "|t - t_{0}|; |t - t_{0}| [GeV^{2}]; Counts",
+                     200, 0.0, 0.0);
     TH1D *h_Q2  = new TH1D("h_Q2",
                      "Q^{2} distribution; Q^{2} [GeV^{2}]; Counts",
                      200, 0.0, 12.0);
@@ -1022,8 +1027,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         // The weighting was exp(-B * |t - t_min|), so we histogram (t - t_min)
         // which ranges from 0 (forward peak) to (t_max - t_min).
         double t_val = invariantSquare(v_virtual, p2_lab, false); // (q - p_X)^2
-        double t_shifted = t_val - decay1.t_min; // >= 0, same variable as in the weighting
-        if (std::isfinite(t_shifted) && t_shifted >= 0.0) {
+        double t_shifted = abs(t_val - decay1.t_max); // >= 0, same variable as in the weighting
+        if (std::isfinite(t_shifted)){// && t_shifted >= 0.0) {
             h_t->Fill(t_shifted);
         }
         double Q2_val = -v_virtual.M2();
@@ -1215,7 +1220,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
 
         // -t distribution with exponential fit overlay
         TCanvas *c4 = new TCanvas("c4", "-t Distribution", 800, 600);
-        gPad->SetLogy();
+        // gPad->SetLogy();
         h_t->SetLineColor(kBlue);
         h_t->SetLineWidth(2);
         h_t->Draw();
@@ -1242,7 +1247,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
 
         // Q2 distribution
         TCanvas *c5 = new TCanvas("c5", "Q2 Distribution", 800, 600);
-        gPad->SetLogy();
+        // gPad->SetLogy();
         h_Q2->SetLineColor(kBlue);
         h_Q2->SetLineWidth(2);
         h_Q2->Draw();
