@@ -6,7 +6,7 @@ target_pid:     2212
 theta_range:    0 180
 E_range:        0 6
 Q2_range:       0 6
-t_slope:        4
+t_slope:        1
 print_debug:    0
 write_lund:     0
 gen_plots:      1

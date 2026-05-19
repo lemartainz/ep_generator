@@ -843,7 +843,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
 
     TH1D *h_X = new TH1D("h_X",
                      "M(X); M_{X} [GeV]; Counts",
-                     100, 1.5, 3.5);
+                     100, 0, 0);
 
     // Weighted-variable histograms
     TH1D *h_t   = new TH1D("h_t",
@@ -858,7 +858,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
 
     TH1D *h_int = new TH1D("h_int",
                      "M(p pbar); Mass [GeV]; Counts",
-                     100, 1.5, 3.5);
+                     100, 0, 0);
 
     TLorentzVector p_target(0,0,0,target_mass);
     TLorentzVector p_beam(0,0,input.beam_energy,input.beam_energy);
@@ -1173,34 +1173,43 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
     // (always do this if we have events, independent of gen_plots)
     // -----------------------------------------------------
     if (h_t->GetEntries() > 50) {
-        // Fit range: skip first bin (edge effects) up to where stats run out
         double fit_lo = h_t->GetBinLowEdge(2);
-        double fit_hi = h_t->GetXaxis()->GetBinUpEdge(h_t->FindLastBinAbove(5));
-        if (fit_hi <= fit_lo) fit_hi = h_t->GetXaxis()->GetXmax();
+
+        // Restrict to ~2 mean values: beyond this kinematic phase space
+        // dominates over the exponential weighting, especially at small B
+        double mean_t = h_t->GetMean();
+        double fit_hi = std::min(
+            h_t->GetXaxis()->GetBinUpEdge(h_t->FindLastBinAbove(5)),
+            2.0 * mean_t
+        );
+        if (fit_hi <= fit_lo) fit_hi = mean_t;
 
         TF1 *f_exp = new TF1("f_exp", "[0]*exp(-[1]*x)", fit_lo, fit_hi);
-        f_exp->SetParameters(h_t->GetMaximum(), input.t_slope);
+        f_exp->SetParameters(h_t->GetMaximum(), input.t_slope > 0 ? input.t_slope : 1.0);
         f_exp->SetParNames("Norm", "B_fit");
-        h_t->Fit(f_exp, "RQ0"); // R=range, Q=quiet, 0=don't draw yet
+        h_t->Fit(f_exp, "RQ0");
 
         double B_fit   = f_exp->GetParameter(1);
         double B_err   = f_exp->GetParError(1);
         double chi2ndf = (f_exp->GetNDF() > 0)
-                       ? f_exp->GetChisquare() / f_exp->GetNDF() : -1;
+                    ? f_exp->GetChisquare() / f_exp->GetNDF() : -1;
 
         cout << "\n===== t-slope verification =====" << endl;
         cout << "  Input  t_slope (B_in):  " << input.t_slope << " GeV^{-2}" << endl;
         cout << "  Fitted t_slope (B_fit): " << std::fixed << std::setprecision(3)
-             << B_fit << " +/- " << B_err << " GeV^{-2}" << endl;
+            << B_fit << " +/- " << B_err << " GeV^{-2}" << endl;
+        cout << "  Fit range:              [" << fit_lo << ", " << fit_hi << "] GeV^2" << endl;
         cout << "  chi2/ndf:               " << std::setprecision(2) << chi2ndf << endl;
-        double pull = (input.t_slope > 0)
-                    ? std::abs(B_fit - input.t_slope) / std::max(B_err, 1e-9)
-                    : 0.0;
-        if (pull < 3.0) {
-            cout << "  Status: PASS (|pull| = " << std::setprecision(1) << pull << ")" << endl;
+
+        // For B=0, just check the shape is flat; pull only meaningful for B > 0
+        if (input.t_slope > 0) {
+            double pull = std::abs(B_fit - input.t_slope) / std::max(B_err, 1e-9);
+            if (pull < 3.0)
+                cout << "  Status: PASS (|pull| = " << std::setprecision(1) << pull << ")" << endl;
+            else
+                cout << "  Status: ** FAIL ** (|pull| = " << pull << ")" << endl;
         } else {
-            cout << "  Status: ** FAIL ** (|pull| = " << std::setprecision(1) << pull
-                 << ", fitted slope disagrees with input)" << endl;
+            cout << "  Status: B=0 (flat generation), fitted B = " << B_fit << endl;
         }
         cout << "================================\n" << endl;
     }
