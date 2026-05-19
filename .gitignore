@@ -1,4 +1,3 @@
-*.root
 *.lund
 .vscode
 .DS_Store
@@ -12,5 +11,4 @@
 *.synctex.gz
 *.fdb_latexmk
 *.fls
-*.py
 *.api
