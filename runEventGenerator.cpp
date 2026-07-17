@@ -197,13 +197,22 @@ struct ReadInput {
     // TH3::GetRandom3 instead of the uniform Q2/E/theta ranges above.
     std::string data_hist_file;
     std::string data_hist_name = "h_data";
-    // Continuous weight function w(Q2, E') derived from real data.
-    // A TH2D stored in a ROOT file; the generator evaluates it with
-    // TH2::Interpolate (bilinear -> continuous) and uses the value as
-    // an accept-reject probability on top of uniform Q2/E' sampling.
-    // Expected to be normalized so that max(w) = 1.
+    // Continuous weight function w(Q2, E') = data / gen (data density
+    // divided by the generator's proposal density), built by
+    // build_weight_func.py. A TH2D stored in a ROOT file; the generator
+    // evaluates it with TH2::Interpolate (bilinear -> continuous) and uses
+    // the value as an accept-reject probability on top of uniform Q2/E'
+    // sampling. Normalized so that max(w) = 1 (keep with prob w).
     std::string weight_func_file;
     std::string weight_func_name = "w_Q2_Ep";
+    // Continuous momentum weight w(p_lead, p_sub) = data / gen over the
+    // leading / sub-leading proton (2212 only) momentum magnitudes, built by
+    // build_weight_func.py --mode pmom. A TH2D (axes: p_lead, p_sub [GeV]).
+    // Applied as a SECOND accept-reject AFTER the full event is built (the
+    // proton momenta only exist once the whole decay chain is done), on top
+    // of the Q2/E' weight above. Normalized so that max(w) = 1.
+    std::string mom_weight_file;
+    std::string mom_weight_name = "w_pp";
 };
 
 // Two-body decay result
@@ -305,6 +314,12 @@ ReadInput readInputFile(const string &filename) {
             iss >> fname;
             if (iss >> hname) input.weight_func_name = hname;
             input.weight_func_file = fname;
+        } else if (key == "mom_weight") {
+            // mom_weight: path/to/file.root  [hist_name]
+            std::string fname, hname;
+            iss >> fname;
+            if (iss >> hname) input.mom_weight_name = hname;
+            input.mom_weight_file = fname;
         } else if (key == "data_hist") {
             // data_hist: path/to/file.root  [hist_name]
             std::string fname, hname;
@@ -524,9 +539,10 @@ public:
                     continue;
 
                 // Continuous data-driven weighting via interpolation.
-                // weight_func is a TH2D of the real-data (Q2, E') density,
-                // normalized so max=1. TH2::Interpolate does bilinear
-                // interpolation between bin centers -> a smooth w(Q2,E').
+                // weight_func is a TH2D of w = data/gen (data density over
+                // the uniform proposal density), normalized so max=1.
+                // TH2::Interpolate does bilinear interpolation between bin
+                // centers -> a smooth w(Q2,E'). Keep with probability w.
                 if (weight_func) {
                     // clamp to the histogram's interior, otherwise
                     // Interpolate returns 0 at the boundary
@@ -677,25 +693,24 @@ public:
 
         double cosT;
         if (B > 0) {
-            vector<double> t_candidates(nCandidates), weights(nCandidates);
-            double weight_sum = 0.0;
-            for (int i = 0; i < nCandidates; ++i) {
-                t_candidates[i] = rnd.Uniform(t_min, t_max);
-                weights[i]      = exp(-B * (t_max - t_candidates[i])); // t' = t_0 - t, peaks at t_0
-                weight_sum     += weights[i];
+            // Sample t' = t_max - t from a truncated exponential on [0, dt]
+            // with pdf ~ exp(-B t'), EXACTLY, via inverse-CDF. This replaces
+            // the old 10k-candidate brute-force draw (same distribution, but
+            // O(1) instead of O(nCandidates) and continuous instead of
+            // discretized). CDF(u)=(1-e^{-Bu})/(1-e^{-B dt}); invert for u.
+            const double dt = t_max - t_min;
+            const double r  = rnd.Uniform();
+            const double a  = B * dt;
+            double u;                                   // = t_max - t_sampled
+            if (a < 1e-9) {
+                u = r * dt;                             // B*dt -> 0: uniform limit
+            } else {
+                u = -std::log1p(-r * (1.0 - std::exp(-a))) / B;
             }
-            for (auto &w : weights) w /= weight_sum;
-
-            double r = rnd.Uniform(), cumsum = 0.0;
-            int pick_idx = 0;
-            for (; pick_idx < nCandidates; ++pick_idx) {
-                cumsum += weights[pick_idx];
-                if (r <= cumsum) break;
-            }
-            double t_sampled = t_candidates[std::min(pick_idx, nCandidates-1)];
+            const double t_sampled = t_max - u;
 
             // t_max -> cosT=+1 (forward), t_min -> cosT=-1 (backward)
-            double frac = (t_sampled - t_min) / (t_max - t_min);
+            const double frac = (t_sampled - t_min) / dt;
             cosT = std::clamp(2.0 * frac - 1.0, -1.0, 1.0);
         } else {
             cosT = rnd.Uniform(-1.0, 1.0);
@@ -814,8 +829,9 @@ bool performDecay(const TLorentzVector& parent_lab, int parent_pdg,
 // ---------------------------------------------------------
 // Main event-generation driver
 // ---------------------------------------------------------
-void runEventGenerator(const std::string& lund_filename = "events.lund") {
-    auto input = readInputFile("input.txt");
+void runEventGenerator(const std::string& lund_filename = "events.lund",
+                       const std::string& input_filename = "input.txt") {
+    auto input = readInputFile(input_filename);
 
     if (input.num_events <= 0) {
         cerr << "ERROR: num_events <= 0 in input file.\n";
@@ -839,7 +855,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
                                100, 0.0, 180.0);
     TH1D *h_W       = new TH1D("h_W",
                                "Invariant Mass W; W [GeV]; Counts",
-                               100, 0.0, 6.0);
+                               100, 0.0, 0.0);
 
     TH1D *h_X = new TH1D("h_X",
                      "M(X); M_{X} [GeV]; Counts",
@@ -851,10 +867,21 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
                      200, 0.0, 0.0);
     TH1D *h_Q2  = new TH1D("h_Q2",
                      "Q^{2} distribution; Q^{2} [GeV^{2}]; Counts",
-                     200, 0.0, 12.0);
+                     200, 0.0, 0.0);
     TH1D *h_Ep  = new TH1D("h_Ep",
                      "Scattered electron energy; E' [GeV]; Counts",
-                     200, 0.0, 12.0);
+                     200, 0.0, 0.0);
+
+    // Leading / sub-leading final-state proton (2212) momentum magnitude.
+    // Ranked per event (p_lead >= p_sub), the same variables the mom_weight
+    // reshapes -- fill AFTER acceptance so they show the weighted output.
+    // Auto-binned (0,0 limits) so the range adapts to the generated momenta.
+    TH1D *h_p_lead = new TH1D("h_p_lead",
+                     "Leading proton |p|; p_{lead} [GeV]; Counts",
+                     200, 0.0, 7.0);
+    TH1D *h_p_sub  = new TH1D("h_p_sub",
+                     "Sub-leading proton |p|; p_{sub} [GeV]; Counts",
+                     200, 0.0, 7.0);
 
     TH1D *h_int = new TH1D("h_int",
                      "M(p pbar); Mass [GeV]; Counts",
@@ -909,6 +936,30 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         }
     }
 
+    // Optional momentum weight w(p_lead, p_sub): a SECOND accept-reject on the
+    // leading / sub-leading proton (2212) momenta, applied post-decay.
+    TH2D *mom_weight = nullptr;
+    TFile *mom_weight_tf = nullptr;
+    if (!input.mom_weight_file.empty()) {
+        mom_weight_tf = TFile::Open(input.mom_weight_file.c_str(), "READ");
+        if (!mom_weight_tf || mom_weight_tf->IsZombie()) {
+            cerr << "ERROR: cannot open mom_weight file "
+                 << input.mom_weight_file << endl;
+        } else {
+            mom_weight = dynamic_cast<TH2D*>(
+                mom_weight_tf->Get(input.mom_weight_name.c_str()));
+            if (!mom_weight) {
+                cerr << "ERROR: TH2D '" << input.mom_weight_name
+                     << "' not found in " << input.mom_weight_file << endl;
+            } else {
+                cout << "Momentum weight function enabled: "
+                     << input.mom_weight_file << ":"
+                     << input.mom_weight_name
+                     << "  (bilinear Interpolate on p_lead, p_sub)" << endl;
+            }
+        }
+    }
+
     // Parse reaction
     auto parents   = getFirstDecayDaughters(input.reaction);
     auto decay_map = parseDecayMap(input.reaction);
@@ -952,6 +1003,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
     long long n_reject_mass        = 0;
     long long n_reject_decay       = 0;
     long long n_reject_finalcheck  = 0;
+    long long n_reject_mom         = 0;
 
     const int target_events = input.num_events;
     const int progress_step = std::max(1, target_events / 10);
@@ -1018,6 +1070,37 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         }
         if (!ok) { ++n_reject_finalcheck; continue; }
 
+        // -------------------------------------------------------------
+        // Second accept-reject stage: proton-momentum weight w(p_lead, p_sub).
+        // The proton momenta only exist now that the full decay chain is
+        // built, so this reshaping cannot live in generateOneElectron.
+        // Take the leading / sub-leading momentum magnitude of the two
+        // protons (pid == 2212, antiproton excluded) and keep the event
+        // with probability w (bilinear TH2::Interpolate, normalized max=1).
+        // -------------------------------------------------------------
+        if (mom_weight) {
+            double p_lead = -1.0, p_sub = -1.0; // two largest 2212 |p|
+            for (const auto& pr : final_particles) {
+                if (pr.first != 2212) continue;
+                double p = pr.second.Vect().Mag();
+                if (p > p_lead)      { p_sub = p_lead; p_lead = p; }
+                else if (p > p_sub)  { p_sub = p; }
+            }
+            if (p_sub < 0.0) { ++n_reject_mom; continue; } // need two protons
+
+            double x_lo = mom_weight->GetXaxis()->GetXmin();
+            double x_hi = mom_weight->GetXaxis()->GetXmax();
+            double y_lo = mom_weight->GetYaxis()->GetXmin();
+            double y_hi = mom_weight->GetYaxis()->GetXmax();
+            // Outside the histogram interior Interpolate returns 0 -> reject.
+            if (p_lead <= x_lo || p_lead >= x_hi ||
+                p_sub  <= y_lo || p_sub  >= y_hi) { ++n_reject_mom; continue; }
+
+            double w = mom_weight->Interpolate(p_lead, p_sub);
+            if (!std::isfinite(w) || w <= 0.0) { ++n_reject_mom; continue; }
+            if (gen.rnd.Uniform() > w)         { ++n_reject_mom; continue; }
+        }
+
         all_final_particles.push_back(final_particles);
         accepted_scattered.push_back(v_scattered);
         accepted_W.push_back(v_W);
@@ -1048,6 +1131,20 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         for (const auto& pr : final_particles) {
             if (pr.first ==  2212)  protons.push_back(pr.second);
             if (pr.first == -2212)  pbars.push_back(pr.second);
+        }
+
+        // Diagnostic: leading / sub-leading proton |p| of the accepted event.
+        // Same ranking (p_lead >= p_sub) and 2212-only selection the mom_weight
+        // uses, so these histograms show the post-weighting momentum spectra.
+        if (protons.size() >= 2) {
+            double p_lead = -1.0, p_sub = -1.0;
+            for (const auto& pv : protons) {
+                double p = pv.Vect().Mag();
+                if (p > p_lead)      { p_sub = p_lead; p_lead = p; }
+                else if (p > p_sub)  { p_sub = p; }
+            }
+            if (std::isfinite(p_lead)) h_p_lead->Fill(p_lead);
+            if (std::isfinite(p_sub))  h_p_sub->Fill(p_sub);
         }
 
         // Reconstruct: choose (p + pbar) combo closest to truth mX
@@ -1096,7 +1193,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
 
     // Print rejection diagnostics
     long long n_rejected_total = n_reject_electron + n_reject_mass
-                               + n_reject_decay + n_reject_finalcheck;
+                               + n_reject_decay + n_reject_finalcheck
+                               + n_reject_mom;
     cout << "\nFinished processing decays." << endl;
     cout << "  Requested events:         " << target_events << endl;
     cout << "  Total attempts:           " << n_attempts << endl;
@@ -1106,6 +1204,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
     cout << "    - intermediate mass:    " << n_reject_mass << endl;
     cout << "    - decay failures:       " << n_reject_decay << endl;
     cout << "    - final-state checks:   " << n_reject_finalcheck << endl;
+    cout << "    - momentum weight:      " << n_reject_mom << endl;
     if (n_attempts > 0) {
         cout << "  Acceptance rate:          "
              << std::fixed << std::setprecision(2)
@@ -1266,6 +1365,27 @@ void runEventGenerator(const std::string& lund_filename = "events.lund") {
         h_Ep->SetLineColor(kBlue);
         h_Ep->SetLineWidth(2);
         h_Ep->Draw();
+
+        // Leading / sub-leading proton |p| (overlaid)
+        TCanvas *c7 = new TCanvas("c7", "Final-State Proton Momenta", 800, 600);
+        h_p_lead->SetLineColor(kBlue);
+        h_p_lead->SetLineWidth(2);
+        h_p_sub->SetLineColor(kRed);
+        h_p_sub->SetLineWidth(2);
+        // set y-range to fit whichever spectrum is taller so neither clips
+        double p_ymax = std::max(h_p_lead->GetMaximum(), h_p_sub->GetMaximum());
+        double p_xmin = std::min(h_p_lead->GetXaxis()->GetXmin(), h_p_sub->GetXaxis()->GetXmin());
+        double p_xmax = std::max(h_p_lead->GetXaxis()->GetXmax(), h_p_sub->GetXaxis()->GetXmax());
+        h_p_lead->GetXaxis()->SetRangeUser(0, p_xmax);
+        h_p_lead->SetMaximum(1.1 * p_ymax);
+        h_p_lead->SetTitle("Final-state proton momentum magnitude; |p| [GeV]; Counts");
+        h_p_lead->Draw();
+        h_p_sub->Draw("SAME");
+        TLegend *leg_p = new TLegend(0.6, 0.72, 0.88, 0.88);
+        leg_p->AddEntry(h_p_lead, "Leading proton |p|", "l");
+        leg_p->AddEntry(h_p_sub,  "Sub-leading proton |p|", "l");
+        leg_p->Draw();
+        // c7->SaveAs("proton_momenta.png"); // viewable even in batch (-b) mode
     }
 
     cout << "Event generation complete." << endl;

@@ -1,14 +1,14 @@
 # This is the beginning of adding in an input file for the event generator class
-num_events:     100000
+num_events:     200000
 beam_energy:    10.2
 W_min:          2.85
 target_pid:     2212
-theta_range:    0 180
-E_range:        0 6
-Q2_range:       0 6
+theta_range:    5 35
+E_range:        0 10
+Q2_range:       0 10
 t_slope:        1
 print_debug:    0
-write_lund:     0
+write_lund:     1
 gen_plots:      1
 reaction:       2212, 9999: 9999, 2212, -2212
 mass_9999: BW 2. 0.4
@@ -17,3 +17,4 @@ mass_9999: BW 2. 0.4
 # Format:  weight_func: <root file> [<hist name>]
 # Hist name defaults to "w_Q2_Ep" if omitted.
 weight_func: weight_func.root w_Q2_Ep
+mom_weight: mom_weight.root w_pp

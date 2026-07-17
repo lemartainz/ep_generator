@@ -159,3 +159,30 @@ def compute_kinematics_batch(path):
         out["Mppbar"] = np.where(has_pp, (p_p1 + p_p2).mass, np.nan)
 
     return out
+
+
+# ------------------------------------------------------------------ #
+# Leading / sub-leading proton momentum (used by build_weight_func.py
+# --mode pmom to reweight the recoil-proton kinematics).
+# ------------------------------------------------------------------ #
+def proton_momenta_batch(path, pid=2212):
+    """
+    Stream a LUND file and return the leading and sub-leading momentum
+    magnitudes |p| of the `pid` particles in each event (default 2212,
+    i.e. protons only -- the antiproton -2212 is excluded).
+
+    Events with fewer than two matching protons are skipped.  Returns
+    two numpy arrays (p_lead, p_sub), sorted so p_lead >= p_sub, matching
+    the (p_p1, p_p2) convention in real_data.csv.
+    """
+    p_lead, p_sub = [], []
+    for ev in read_lund(path):
+        mags = []
+        for p in ev.particles:
+            if p.pid == pid:
+                mags.append((p.px * p.px + p.py * p.py + p.pz * p.pz) ** 0.5)
+        if len(mags) >= 2:
+            mags.sort(reverse=True)
+            p_lead.append(mags[0])
+            p_sub.append(mags[1])
+    return np.asarray(p_lead), np.asarray(p_sub)
