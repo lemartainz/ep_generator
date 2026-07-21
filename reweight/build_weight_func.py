@@ -147,6 +147,9 @@ def parse_cut(spec):
     raise SystemExit(f"Bad --cut '{spec}'. Use e.g. \"W>=2.85\".")
 
 
+M_E = 0.000511  # GeV, for E' = sqrt(|p_e|^2 + m_e^2)
+
+
 def gen_xy(mode, mc_path):
     """Return (x, y) generator arrays for the chosen mode from a LUND file."""
     if mode == "q2ep":
@@ -155,6 +158,77 @@ def gen_xy(mode, mc_path):
     elif mode == "pmom":
         return proton_momenta_batch(mc_path, pid=2212)
     raise SystemExit(f"unknown mode {mode!r}")
+
+
+def root_xy(mode, path, tree, cut_cols):
+    """Return (x, y, cutvals) for the mode from a reconstructed ROOT TTree.
+
+    Reads the analysis branches (Q2, P_mag_e, P_mag_p1, P_mag_p2, ...) and
+    builds the same quantities that real_data.csv was made from:
+        q2ep : x = Q2,                       y = E' = sqrt(P_mag_e^2 + m_e^2)
+        pmom : x = p_lead = max(|p1|,|p2|),  y = p_sub = min(|p1|,|p2|)
+    `cut_cols` are extra raw branch names (e.g. "W") needed for selections.
+    Both the reco-sim and the real-data trees share this branch layout, so
+    numerator and denominator are computed identically (reco level).
+    """
+    import uproot
+    if mode == "q2ep":
+        need = ["Q2", "P_mag_e"]
+    elif mode == "pmom":
+        need = ["P_mag_p1", "P_mag_p2"]
+    else:
+        raise SystemExit(f"unknown mode {mode!r}")
+    branches = sorted(set(need) | set(cut_cols))
+    t = uproot.open(path)[tree]
+    a = t.arrays(branches, library="np")
+
+    if mode == "q2ep":
+        x = a["Q2"]
+        y = np.sqrt(a["P_mag_e"] ** 2 + M_E ** 2)
+    else:  # pmom
+        x = np.maximum(a["P_mag_p1"], a["P_mag_p2"])
+        y = np.minimum(a["P_mag_p1"], a["P_mag_p2"])
+    cutvals = {c: a[c] for c in cut_cols}
+    return x, y, cutvals
+
+
+def load_source(spec, tree, mode, cuts, tag):
+    """Load (x, y) for `mode` from a CSV, LUND, or ROOT-tree source and apply
+    `cuts`.  Source type is auto-detected from the file extension:
+        *.csv  -> real-data style CSV (columns per MODES[mode]['data_cols'])
+        *.lund -> generator truth LUND (no cuts supported)
+        *.root -> reconstructed TTree `tree` (branch-based, cuts supported)
+    """
+    cut_cols = sorted({c[0] for c in cuts})
+
+    if spec.endswith(".csv"):
+        xcol, ycol = MODES[mode]["data_cols"]
+        d = load_csv(spec, sorted({xcol, ycol, *cut_cols}))
+        x, y = d[xcol], d[ycol]
+        cutvals = {c: d[c] for c in cut_cols}
+    elif spec.endswith(".lund"):
+        if cuts:
+            raise SystemExit("cuts are not supported on a LUND source "
+                             f"({spec}); use a reconstructed .root tree.")
+        x, y = gen_xy(mode, spec)
+        cutvals = {}
+    elif ".root" in spec:
+        x, y, cutvals = root_xy(mode, spec, tree, cut_cols)
+    else:
+        raise SystemExit(f"Unknown source type for {spec!r} "
+                         "(expected .csv, .lund, or .root).")
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if cuts:
+        mask = np.ones(len(x), dtype=bool)
+        for col, op_fn, val, _op in cuts:
+            mask &= op_fn(np.asarray(cutvals[col], dtype=float), val)
+        desc = " AND ".join(f"{c[0]}{c[3]}{c[2]:g}" for c in cuts)
+        print(f"[cut] {tag} selection [{desc}]: kept {int(mask.sum())}/{len(x)} "
+              f"({100*mask.mean():.1f}%)")
+        x, y = x[mask], y[mask]
+    return x, y
 
 
 def hist_density(x, y, x_lo, x_hi, y_lo, y_hi, nx, ny, tag):
@@ -243,6 +317,124 @@ def build_from_data_hist(args, cfg, name):
           f"grid={nx}x{ny}  (sideband-subtracted target)")
 
 
+def _load_hist_npz(path, tag):
+    """Load a 2-D histogram npz (keys 'varnames','edges','counts').
+
+    Returns (varnames, x_edges, y_edges, counts). Same layout that
+    sideband_subtract_nd writes and that build_from_data_hist consumes.
+    """
+    npz    = np.load(path, allow_pickle=True)
+    vnames = [str(v) for v in npz["varnames"]]
+    edges  = [np.asarray(e, dtype=float) for e in npz["edges"]]
+    if len(edges) != 2:
+        raise SystemExit(f"{tag} {path}: expected a 2-D histogram, got "
+                         f"{len(edges)}-D (vars={vnames}).")
+    counts = np.asarray(npz["counts"], dtype=float)
+    return vnames, edges[0], edges[1], counts
+
+
+def build_from_rec_hist(args, cfg, name):
+    """
+    Weight surface  w = N_sub / N_rec  for RECO-level matching.
+
+    Numerator   : sideband-subtracted DATA histogram (--data-hist .npz, keys
+                  'counts'+'edges' from sideband_subtract_nd).
+    Denominator : RECONSTRUCTED simulation on the SAME edges (--rec), i.e. the
+                  reco of the unweighted baseline generator that will be
+                  reweighted. Sourced from a pre-binned .npz (same keys;
+                  recommended, so the reco selection matches the notebook
+                  exactly) or from a reco .root/.csv histogrammed on the
+                  numerator edges.
+
+    Unlike build_from_data_hist (w = d/g against the THROWN generator, which
+    makes the *thrown* spectrum match data), this divides by the RECONSTRUCTED
+    sim so that AFTER GEMC + reconstruction the reweighted sim matches the
+    subtracted data. It folds the inverse acceptance (1/eps) into the weight:
+    reco_weighted = w * g * eps = (N_sub / N_rec) * N_rec = N_sub, under the
+    assumption of ~diagonal bin migration (thrown bin ~= reco bin). If
+    migration is non-negligible, iterate: generate -> reconstruct -> recompute
+    N_sub/N_rec (-> 1 at closure) -> multiply into the weight -> repeat.
+    """
+    import array as _arr
+
+    # --- numerator: sideband-subtracted data ---
+    _, x_edges, y_edges, counts = _load_hist_npz(args.data_hist, "[data-hist]")
+    nx, ny = len(x_edges) - 1, len(y_edges) - 1
+    net = counts.sum()
+    D = np.clip(counts, 0.0, None)                 # no negative density
+    if D.sum() <= 0:
+        raise SystemExit("Subtracted data histogram is <= 0 after clipping.")
+
+    # --- denominator: reconstructed sim on the SAME edges ---
+    if args.rec.endswith(".npz"):
+        _, rxe, rye, R = _load_hist_npz(args.rec, "[rec-hist]")
+        if not (np.allclose(rxe, x_edges) and np.allclose(rye, y_edges)):
+            raise SystemExit("--rec edges do not match --data-hist edges; "
+                             "rebuild both on the same binning.")
+        R = np.clip(R, 0.0, None)                  # counts, but guard anyway
+    else:
+        cuts = [parse_cut(c) for c in args.cut]
+        rx, ry = load_source(args.rec, args.tree, args.mode, cuts, "rec")
+        rx = np.asarray(rx, dtype=float)
+        ry = np.asarray(ry, dtype=float)
+        fin = np.isfinite(rx) & np.isfinite(ry)
+        R, _, _ = np.histogram2d(rx[fin], ry[fin], bins=[x_edges, y_edges])
+    if R.sum() <= 0:
+        raise SystemExit("Reconstructed-sim histogram is empty on these edges.")
+
+    # probability-normalize both, then w = N_sub / N_rec (overall constant is
+    # absorbed by the max=1 rescale below).
+    Dn = D / D.sum()
+    Rn = R / R.sum()
+    W  = np.divide(Dn, Rn, out=np.zeros_like(Dn), where=Rn > 0.0)
+
+    # A low-statistics reco bin (tiny N_rec) produces a runaway ratio that,
+    # after the max=1 rescale, sets wmax and crushes every other weight -- this
+    # tanks the accept-reject efficiency AND spikes the thrown output into that
+    # one bin. Guard with a minimum-N_rec floor and/or a cap on the raw ratio.
+    nz = W > 0
+    if args.min_rec > 0:
+        killed = int(np.sum(nz & (R < args.min_rec)))
+        W[R < args.min_rec] = 0.0                  # ratio not trustworthy -> drop
+        nz = W > 0
+        print(f"[rec-hist] min-rec={args.min_rec:g}: zeroed {killed} bins with "
+              f"N_rec below threshold.")
+    cap = None
+    if args.wmax is not None:
+        cap = float(args.wmax)
+    elif args.wclip_pct is not None and nz.any():
+        cap = float(np.percentile(W[nz], args.wclip_pct))
+    if cap is not None:
+        n_clip = int(np.sum(W > cap))
+        W = np.minimum(W, cap)
+        print(f"[rec-hist] clipped {n_clip} bins at raw-ratio cap={cap:.4g}.")
+
+    wpk = W.max()
+    if wpk <= 0:
+        raise SystemExit("Weight surface is all zero (check --rec / edges).")
+    W /= wpk                                        # accept-reject prob in [0,1]
+
+    n_holes = int(np.sum((R <= 0) & (D > 0)))
+    print(f"[rec-hist] w = N_sub/N_rec normalized: max=1.0, mean={W.mean():.3f}, "
+          f"zero-fraction={float(np.mean(W <= 0.0)):.3f}")
+    print(f"[rec-hist] net signal={net:.0f}, clipped {int((counts < 0).sum())} "
+          f"negative data bins; {n_holes} bins have data but no reco-sim "
+          f"(acceptance holes -> w=0, cannot be populated).")
+
+    h = ROOT.TH2D(name, cfg["title"],
+                  nx, _arr.array('d', x_edges),
+                  ny, _arr.array('d', y_edges))
+    for ix in range(nx):
+        for iy in range(ny):
+            h.SetBinContent(ix + 1, iy + 1, float(W[ix, iy]))
+
+    tf = ROOT.TFile(args.out, "RECREATE")
+    h.Write()
+    tf.Close()
+    print(f"[rec-hist] wrote {args.out}:{name}  mode={args.mode}  "
+          f"grid={nx}x{ny}  (reco-level N_sub/N_rec target)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=sorted(MODES), default="q2ep",
@@ -278,12 +470,40 @@ def main():
                          "from sideband_subtract_nd: keys 'counts' + 'edges'). "
                          "When set, the numerator density comes from this file "
                          "instead of re-binning --data, and its bin edges "
-                         "define the weight grid. Requires --mc.")
+                         "define the weight grid. Requires --mc (or --rec).")
+    ap.add_argument("--rec", default=None,
+                    help="RECONSTRUCTED-sim denominator for reco-level matching: "
+                         "build w = N_sub/N_rec instead of d/g. Either a "
+                         "pre-binned .npz on the SAME edges as --data-hist "
+                         "(keys 'varnames','edges','counts'; recommended), or a "
+                         "reco .root/.csv histogrammed onto those edges. Use "
+                         "this (not --mc) when the RECONSTRUCTED sim must match "
+                         "the data after GEMC. Requires --data-hist.")
+    ap.add_argument("--tree", default="Individual",
+                    help="TTree name for a reconstructed .root passed to --rec "
+                         "(default 'Individual').")
+    ap.add_argument("--min-rec", dest="min_rec", type=float, default=0,
+                    help="For --rec: zero the weight in bins with N_rec below "
+                         "this count (untrustworthy ratio). Default 0 (off).")
+    ap.add_argument("--wmax", type=float, default=None,
+                    help="For --rec: absolute cap on the raw N_sub/N_rec ratio "
+                         "before the max=1 rescale (tames low-stat spikes).")
+    ap.add_argument("--wclip-pct", dest="wclip_pct", type=float, default=None,
+                    help="For --rec: cap the raw ratio at this percentile of the "
+                         "nonzero bins (e.g. 95). Ignored if --wmax is set.")
     args = ap.parse_args()
 
     cfg  = MODES[args.mode]
     name = args.name or cfg["default_name"]
     xcol, ycol = cfg["data_cols"]
+
+    # --- reco-level matching: w = N_sub / N_rec (reconstructed denominator) ---
+    if args.rec:
+        if not args.data_hist:
+            raise SystemExit("--rec (reconstructed denominator) requires "
+                             "--data-hist (the sideband-subtracted numerator).")
+        build_from_rec_hist(args, cfg, name)
+        return
 
     # --- pre-built subtracted-histogram path: d(x,y) is read, not re-binned ---
     if args.data_hist:
