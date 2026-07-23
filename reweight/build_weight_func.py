@@ -159,6 +159,7 @@ def _read_prev_surface(path, name, x_edges, y_edges):
         raise SystemExit(f"--prev: file not found: {path}")
     tf = ROOT.TFile(path)                 # constructor, not TFile.Open (segfaults)
     if tf.IsZombie():
+        tf.Close()
         raise SystemExit(f"--prev: cannot open {path}")
     h = tf.Get(name)
     if not h:
