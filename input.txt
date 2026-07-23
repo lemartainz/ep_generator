@@ -17,4 +17,4 @@ mass_9999: BW 2. 0.4
 # Format:  weight_func: <root file> [<hist name>]
 # Hist name defaults to "w_Q2_Ep" if omitted.
 weight_func: weight_func.root w_Q2_Ep
-mom_weight: mom_weight.root w_pp
+# mom_weight: mom_weight.root w_pp

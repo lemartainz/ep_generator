@@ -49,6 +49,54 @@ supply g; omit it to fall back to an explicit uniform proposal (flat g).
 
 CSV must have columns: Q2, Ep (q2ep mode) or p_p1, p_p2 (pmom mode).
 
+Reco-level denominator (--rec)
+------------------------------
+For the iterative data-driven scheme the denominator must be the
+RECONSTRUCTED simulation (post-GEMC/GEANT), not the generator truth. The
+ppbar_weights.ipynb notebook writes both histograms on identical edges:
+
+    save_subtracted_nd -> subtracted_q2ep.npz  (numerator D: subtracted DATA)
+    save_rec_hist_nd   -> rec_q2ep.npz         (denominator R: reconstructed SIM)
+
+Pass D via --data-hist and R via --rec; the weight is then the reco-level
+ratio w = D_subtracted / R_reconstructed. (--mc, which bins generator TRUTH
+kinematics from a LUND, remains available as the truth-level fallback.)
+
+Iterative reweighting (--prev / --archive)
+------------------------------------------
+The D/R ratio is measured in RECONSTRUCTED kinematics but applied at
+GENERATOR (truth) level, so one pass does not land exactly on the data -- you
+iterate until D/R -> 1. Each pass measures the residual correction from a run
+that ALREADY has the previous weight applied (its reco -> a fresh rec_*.npz),
+so the generator must see the running PRODUCT:
+
+        w_total_{n+1} = w_total_n * (d / g_n),   renormalized to max = 1.
+
+--prev feeds the previous cumulative surface in; the new correction is
+multiplied into it and renormalized before writing --out (which stays what
+the generator reads via `weight_func:` in input.txt). --archive keeps a
+versioned copy of each pass so you can plot d/g -> 1 and roll back.
+
+    # iteration 0: no --prev, seed the archive. --rec is the reco of the
+    # UNWEIGHTED baseline run.
+    python build_weight_func.py --data-hist subtracted_q2ep.npz \\
+        --rec rec_q2ep.npz --out weight_func.root \\
+        --name w_Q2_Ep --archive reweight/iters
+    # -> weight_func.root  and  reweight/iters/w_q2ep_iter0.root
+
+    # iteration n>=1: --rec is the reco of the run that used the PREVIOUS
+    # surface, --prev is the last archived cumulative weight
+    python build_weight_func.py --data-hist subtracted_q2ep.npz \\
+        --rec rec_q2ep_iter1.npz --out weight_func.root \\
+        --name w_Q2_Ep --prev reweight/iters/w_q2ep_iter0.root \\
+        --archive reweight/iters
+    # -> weight_func.root (cumulative)  and  reweight/iters/w_q2ep_iter1.root
+
+All iterations MUST share identical bin edges (keep the same --data-hist /
+--rec grid), or the bin-by-bin product misaligns. --prev is optional: omit it
+for iteration 0, add it (pointing at the last archived iter) for every pass
+after.
+
 Sequential reweighting (pmom mode)
 ----------------------------------
 The proton momenta depend on the Q2/E' kinematics, so the pmom denominator
@@ -87,10 +135,148 @@ Usage
 
 import argparse
 import csv
+import glob
+import os
+import re
+import shutil
+from array import array as _darr
+
 import numpy as np
 import ROOT
 
 from kinematics import compute_kinematics_batch, proton_momenta_batch
+
+
+def _read_prev_surface(path, name, x_edges, y_edges):
+    """Load a previous cumulative-weight TH2D as an [nx, ny] numpy array.
+
+    The stored surface must share the current grid exactly (same bin edges),
+    otherwise a bin-by-bin product would silently misalign kinematics across
+    reweight iterations.
+    """
+    nx, ny = len(x_edges) - 1, len(y_edges) - 1
+    if not os.path.exists(path):
+        raise SystemExit(f"--prev: file not found: {path}")
+    tf = ROOT.TFile(path)                 # constructor, not TFile.Open (segfaults)
+    if tf.IsZombie():
+        raise SystemExit(f"--prev: cannot open {path}")
+    h = tf.Get(name)
+    if not h:
+        tf.Close()
+        raise SystemExit(f"--prev: no TH2 named '{name}' in {path}")
+    if h.GetNbinsX() != nx or h.GetNbinsY() != ny:
+        tf.Close()
+        raise SystemExit(
+            f"--prev grid {h.GetNbinsX()}x{h.GetNbinsY()} != current {nx}x{ny}; "
+            "reweight iterations must share binning.")
+    xe = np.array([h.GetXaxis().GetBinLowEdge(i + 1) for i in range(nx)]
+                  + [h.GetXaxis().GetBinUpEdge(nx)])
+    ye = np.array([h.GetYaxis().GetBinLowEdge(i + 1) for i in range(ny)]
+                  + [h.GetYaxis().GetBinUpEdge(ny)])
+    if not (np.allclose(xe, x_edges) and np.allclose(ye, y_edges)):
+        tf.Close()
+        raise SystemExit(
+            "--prev bin edges differ from the current grid; reweight "
+            "iterations must share identical edges.")
+    prev = np.array([[h.GetBinContent(ix + 1, iy + 1) for iy in range(ny)]
+                     for ix in range(nx)], dtype=float)
+    tf.Close()
+    return prev
+
+
+def _load_rec_hist(path, x_edges, y_edges, data_vnames):
+    """Load the reconstructed-sim denominator R from an npz on identical edges.
+
+    The npz (written by save_rec_hist_nd in ppbar_weights.ipynb) has keys
+    'counts' + 'edges', binned on the SAME grid as the sideband-subtracted
+    target. This is the RECONSTRUCTED simulation (post-GEMC/GEANT), so
+    w = D_subtracted / R_reconstructed is a reco-level weight. Returns a
+    probability-normalized [nx, ny] array.
+    """
+    rz = np.load(path, allow_pickle=True)
+    r_edges = [np.asarray(e, float) for e in rz["edges"]]
+    if len(r_edges) != 2:
+        raise SystemExit(f"--rec {path}: expected a 2-D histogram, got "
+                         f"{len(r_edges)}-D.")
+    if not (np.allclose(r_edges[0], x_edges) and np.allclose(r_edges[1], y_edges)):
+        raise SystemExit(f"--rec {path}: bin edges differ from the --data-hist "
+                         "grid; numerator D and denominator R must share edges.")
+    if "varnames" in rz:
+        r_vnames = [str(v) for v in rz["varnames"]]
+        if r_vnames != list(data_vnames):
+            print(f"[warn] --rec var order {r_vnames} != data {list(data_vnames)}; "
+                  "make sure the axes line up.")
+    R = np.clip(np.asarray(rz["counts"], dtype=float), 0.0, None)
+    if R.sum() <= 0:
+        raise SystemExit(f"--rec {path}: reconstructed histogram is empty.")
+    print(f"[rec] {path}: N_rec={R.sum():.0f} (reconstructed-sim denominator)")
+    return R / R.sum()
+
+
+def _archive_copy(out_path, archive_dir, mode):
+    """Copy the just-written surface to archive_dir/w_<mode>_iter<N>.root.
+
+    N is one past the highest existing index in the directory, so successive
+    calls leave w_<mode>_iter0.root, w_<mode>_iter1.root, ... as a rollback and
+    convergence trail. Returns the destination path.
+    """
+    os.makedirs(archive_dir, exist_ok=True)
+    idxs = []
+    for p in glob.glob(os.path.join(archive_dir, f"w_{mode}_iter*.root")):
+        m = re.search(rf"w_{re.escape(mode)}_iter(\d+)\.root$",
+                      os.path.basename(p))
+        if m:
+            idxs.append(int(m.group(1)))
+    n = max(idxs) + 1 if idxs else 0
+    dst = os.path.join(archive_dir, f"w_{mode}_iter{n}.root")
+    shutil.copy(out_path, dst)
+    return dst
+
+
+def finalize_and_write(W, name, cfg, args, x_edges, y_edges, label=""):
+    """Multiply in --prev (if any), renormalize max->1, write --out, archive.
+
+    W is the raw d/g correction for this pass (0 in unreachable bins). When
+    --prev is given, W is multiplied into the previous cumulative surface so
+    that --out holds the running product
+
+        w_total_{n+1} = w_total_n * (d / g)
+
+    across reweight iterations; the result is renormalized to max=1 so it stays
+    a valid accept-reject probability. With no --prev this is the iteration-0
+    surface (current behavior). --archive additionally drops a versioned copy.
+    """
+    nx, ny = len(x_edges) - 1, len(y_edges) - 1
+
+    if args.prev:
+        prev = _read_prev_surface(args.prev, name, x_edges, y_edges)
+        W = W * prev
+        if W.max() <= 0:
+            raise SystemExit(
+                "Cumulative weight is all zero after multiplying --prev "
+                "(new correction and previous surface have no common support).")
+        print(f"[prev] multiplied in {args.prev} -> cumulative surface")
+
+    W = W / W.max()                       # accept-reject probability in [0, 1]
+    kind = "cumulative" if args.prev else "iteration-0"
+    print(f"[{kind}] w normalized: max=1.0, mean={W.mean():.3f}, "
+          f"zero-fraction={float(np.mean(W <= 0.0)):.3f}")
+
+    xe = _darr('d', [float(e) for e in x_edges])
+    ye = _darr('d', [float(e) for e in y_edges])
+    h = ROOT.TH2D(name, cfg["title"], nx, xe, ny, ye)
+    for ix in range(nx):
+        for iy in range(ny):
+            h.SetBinContent(ix + 1, iy + 1, float(W[ix, iy]))
+    tf = ROOT.TFile(args.out, "RECREATE")
+    h.Write()
+    tf.Close()
+    print(f"[write] {args.out}:{name}  mode={args.mode}  grid={nx}x{ny}"
+          + (f"  {label}" if label else ""))
+
+    if args.archive:
+        dst = _archive_copy(args.out, args.archive, args.mode)
+        print(f"[archive] stored -> {dst}")
 
 
 # Per-mode configuration: data CSV columns, the generator-quantity keys,
@@ -188,10 +374,10 @@ def build_from_data_hist(args, cfg, name):
     (statistical fluctuations) are clipped to zero, since neither a density nor
     an accept probability can be negative.
     """
-    import array as _arr
-
-    if not args.mc:
-        raise SystemExit("--data-hist needs --mc (the g denominator).")
+    if not (args.rec or args.mc):
+        raise SystemExit("--data-hist needs a denominator: --rec <reco npz> "
+                         "(reconstructed sim, for reco-level weights) or "
+                         "--mc <lund> (generator truth).")
 
     npz    = np.load(args.data_hist, allow_pickle=True)
     vnames = [str(v) for v in npz["varnames"]]
@@ -211,36 +397,26 @@ def build_from_data_hist(args, cfg, name):
     print(f"[data-hist] {args.data_hist}: vars={vnames} grid={nx}x{ny} "
           f"net signal={net:.0f} (clipped {int((counts < 0).sum())} negative bins)")
 
-    gx, gy = gen_xy(args.mode, args.mc)
-    gx = np.asarray(gx, dtype=float)
-    gy = np.asarray(gy, dtype=float)
-    finite = np.isfinite(gx) & np.isfinite(gy)
-    G, _, _ = np.histogram2d(gx[finite], gy[finite], bins=[x_edges, y_edges])
-    if G.sum() <= 0:
-        raise SystemExit("No MC points fell inside the data-hist edges.")
-    G = G / G.sum()
+    # --- denominator g: reconstructed sim (--rec, reco-level) or LUND truth ---
+    if args.rec:
+        G = _load_rec_hist(args.rec, x_edges, y_edges, vnames)
+    else:
+        gx, gy = gen_xy(args.mode, args.mc)
+        gx = np.asarray(gx, dtype=float)
+        gy = np.asarray(gy, dtype=float)
+        finite = np.isfinite(gx) & np.isfinite(gy)
+        G, _, _ = np.histogram2d(gx[finite], gy[finite], bins=[x_edges, y_edges])
+        if G.sum() <= 0:
+            raise SystemExit("No MC points fell inside the data-hist edges.")
+        G = G / G.sum()
 
     # rejection weight w = d / g; empty MC bins are unreachable -> w = 0
     W = np.divide(D, G, out=np.zeros_like(D), where=G > 0.0)
-    wmax = W.max()
-    if wmax <= 0:
+    if W.max() <= 0:
         raise SystemExit("Weight surface is all zero (check --mode / edges / --mc).")
-    W /= wmax
-    print(f"[data-hist] w = d/g normalized: max=1.0, mean={W.mean():.3f}, "
-          f"zero-fraction={float(np.mean(W <= 0.0)):.3f}")
 
-    h = ROOT.TH2D(name, cfg["title"],
-                  nx, _arr.array('d', x_edges),
-                  ny, _arr.array('d', y_edges))
-    for ix in range(nx):
-        for iy in range(ny):
-            h.SetBinContent(ix + 1, iy + 1, float(W[ix, iy]))
-
-    tf = ROOT.TFile(args.out, "RECREATE")
-    h.Write()
-    tf.Close()
-    print(f"[data-hist] wrote {args.out}:{name}  mode={args.mode}  "
-          f"grid={nx}x{ny}  (sideband-subtracted target)")
+    finalize_and_write(W, name, cfg, args, x_edges, y_edges,
+                       label="(sideband-subtracted target)")
 
 
 def main():
@@ -279,11 +455,33 @@ def main():
                          "When set, the numerator density comes from this file "
                          "instead of re-binning --data, and its bin edges "
                          "define the weight grid. Requires --mc.")
+    ap.add_argument("--rec", default=None,
+                    help="Reconstructed-sim histogram npz (save_rec_hist_nd in "
+                         "ppbar_weights.ipynb: keys 'counts'+'edges' on the SAME "
+                         "grid as --data-hist). Used as the denominator R so "
+                         "w = D_subtracted / R_reconstructed is a RECO-level "
+                         "weight. Preferred over --mc for --data-hist; requires "
+                         "--data-hist.")
+    ap.add_argument("--prev", default=None,
+                    help="Previous CUMULATIVE weight ROOT file (same TH2D name "
+                         "and identical binning). The new d/g correction is "
+                         "multiplied into it and renormalized, so --out holds "
+                         "the running product across reweight iterations. Omit "
+                         "for the first (iteration-0) pass.")
+    ap.add_argument("--archive", default=None,
+                    help="Directory to also store a versioned copy of the "
+                         "written surface as w_<mode>_iter<N>.root (N "
+                         "auto-incremented). Keeps every iteration for "
+                         "convergence checks and rollback.")
     args = ap.parse_args()
 
     cfg  = MODES[args.mode]
     name = args.name or cfg["default_name"]
     xcol, ycol = cfg["data_cols"]
+
+    if args.rec and not args.data_hist:
+        raise SystemExit("--rec is the reconstructed-sim denominator for the "
+                         "--data-hist path; pass --data-hist too (or drop --rec).")
 
     # --- pre-built subtracted-histogram path: d(x,y) is read, not re-binned ---
     if args.data_hist:
@@ -332,28 +530,14 @@ def main():
     # An empty MC bin means the proposal never reaches that region, so no
     # amount of rejection can populate it -> w = 0 there.
     W = np.where(G > 0.0, D / G, 0.0)
-
-    wmax = W.max()
-    if wmax <= 0:
+    if W.max() <= 0:
         raise SystemExit("Weight surface is all zero (check ranges / inputs).")
-    W /= wmax                        # accept-reject probability in [0, 1]
-    frac_zero = float(np.mean(W <= 0.0))
-    print(f"[hist] w = d/g normalized: max=1.0, mean={W.mean():.3f}, "
-          f"zero-fraction={frac_zero:.3f}")
 
-    h = ROOT.TH2D(name, cfg["title"],
-                  args.nx, x_lo, x_hi,
-                  args.ny, y_lo, y_hi)
-    for ix in range(args.nx):
-        for iy in range(args.ny):
-            h.SetBinContent(ix + 1, iy + 1, float(W[ix, iy]))
-
-    tf = ROOT.TFile(args.out, "RECREATE")
-    h.Write()
-    tf.Close()
-    print(f"[hist] wrote {args.out}:{name}  mode={args.mode}  "
-          f"bins={args.nx}x{args.ny}  range "
-          f"{cfg['xlabel']}=[{x_lo},{x_hi}]  {cfg['ylabel']}=[{y_lo},{y_hi}]")
+    x_edges = np.linspace(x_lo, x_hi, args.nx + 1)
+    y_edges = np.linspace(y_lo, y_hi, args.ny + 1)
+    finalize_and_write(W, name, cfg, args, x_edges, y_edges,
+                       label=f"range {cfg['xlabel']}=[{x_lo},{x_hi}] "
+                             f"{cfg['ylabel']}=[{y_lo},{y_hi}]")
 
 
 if __name__ == "__main__":
