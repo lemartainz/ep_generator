@@ -194,6 +194,8 @@ def _load_rec_hist(path, x_edges, y_edges, data_vnames):
     w = D_subtracted / R_reconstructed is a reco-level weight. Returns a
     probability-normalized [nx, ny] array.
     """
+    if not os.path.exists(path):
+        raise SystemExit(f"--rec: file not found: {path}")
     rz = np.load(path, allow_pickle=True)
     r_edges = [np.asarray(e, float) for e in rz["edges"]]
     if len(r_edges) != 2:
