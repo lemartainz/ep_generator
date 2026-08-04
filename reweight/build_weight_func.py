@@ -62,6 +62,24 @@ Pass D via --data-hist and R via --rec; the weight is then the reco-level
 ratio w = D_subtracted / R_reconstructed. (--mc, which bins generator TRUTH
 kinematics from a LUND, remains available as the truth-level fallback.)
 
+Low-statistics guards (--min-rec / --wmax / --wclip-pct)
+--------------------------------------------------------
+The weight is renormalized so max(w) = 1, which means the single largest bin
+of the raw d/g ratio sets the scale for every other bin. A denominator bin
+holding one or two entries produces a ratio with 100%-level error, and that
+noise bin is usually the maximum -- so every trustworthy bin gets divided by
+it. The accepted SHAPE is unaffected (rejection sampling is invariant to the
+constant C), but the keep fraction collapses and the generator burns most of
+its samples.
+
+    --min-rec N     drop bins whose denominator has fewer than N raw counts
+    --wclip-pct P   cap the raw ratio at its P-th percentile over nonzero bins
+    --wmax V        cap the raw ratio at V (overrides --wclip-pct)
+
+All three act on the per-pass d/g correction, before --prev is multiplied in.
+Start with --min-rec 5: it removes the untrustworthy bins without touching
+where the signal actually lives, and typically buys a several-fold speedup.
+
 Iterative reweighting (--prev / --archive)
 ------------------------------------------
 The D/R ratio is measured in RECONSTRUCTED kinematics but applied at
@@ -191,8 +209,9 @@ def _load_rec_hist(path, x_edges, y_edges, data_vnames):
     The npz (written by save_rec_hist_nd in ppbar_weights.ipynb) has keys
     'counts' + 'edges', binned on the SAME grid as the sideband-subtracted
     target. This is the RECONSTRUCTED simulation (post-GEMC/GEANT), so
-    w = D_subtracted / R_reconstructed is a reco-level weight. Returns a
-    probability-normalized [nx, ny] array.
+    w = D_subtracted / R_reconstructed is a reco-level weight. Returns
+    (probability-normalized [nx, ny] array, raw counts), the latter so the
+    low-statistics guards can be applied on actual bin counts.
     """
     if not os.path.exists(path):
         raise SystemExit(f"--rec: file not found: {path}")
@@ -213,7 +232,7 @@ def _load_rec_hist(path, x_edges, y_edges, data_vnames):
     if R.sum() <= 0:
         raise SystemExit(f"--rec {path}: reconstructed histogram is empty.")
     print(f"[rec] {path}: N_rec={R.sum():.0f} (reconstructed-sim denominator)")
-    return R / R.sum()
+    return R / R.sum(), R
 
 
 def _archive_copy(out_path, archive_dir, mode):
@@ -234,6 +253,49 @@ def _archive_copy(out_path, archive_dir, mode):
     dst = os.path.join(archive_dir, f"w_{mode}_iter{n}.root")
     shutil.copy(out_path, dst)
     return dst
+
+
+def apply_ratio_guards(W, denom_counts, args):
+    """Tame runaway d/g ratios driven by low-statistics denominator bins.
+
+    A bin whose denominator holds a couple of entries yields a ratio with
+    100%-level statistical error, and that noise bin is usually the MAXIMUM of
+    the surface. The max=1 rescale in finalize_and_write then divides every
+    trustworthy bin by it: the shape survives (accept-reject is invariant to an
+    overall constant) but the keep fraction collapses, so the generator throws
+    away most of its samples for nothing.
+
+    --min-rec zeroes bins whose denominator is below a raw-count floor;
+    --wmax / --wclip-pct cap the raw ratio. Both act on the per-pass d/g
+    correction, before --prev is multiplied in, since it is this pass's
+    statistics that decide which bins are trustworthy.
+
+    `denom_counts` must be RAW counts on the weight grid, not a normalized
+    density, or the --min-rec floor is meaningless.
+    """
+    nz = W > 0
+    if args.min_rec > 0:
+        killed = int(np.sum(nz & (denom_counts < args.min_rec)))
+        W = np.where(denom_counts < args.min_rec, 0.0, W)
+        nz = W > 0
+        print(f"[guard] min-rec={args.min_rec:g}: zeroed {killed} bins whose "
+              f"denominator is below the count floor.")
+
+    cap = None
+    if args.wmax is not None:
+        cap = float(args.wmax)
+    elif args.wclip_pct is not None and nz.any():
+        cap = float(np.percentile(W[nz], args.wclip_pct))
+    if cap is not None:
+        n_clip = int(np.sum(W > cap))
+        W = np.minimum(W, cap)
+        print(f"[guard] clipped {n_clip} bins at raw-ratio cap={cap:.4g}.")
+
+    if W.max() <= 0:
+        raise SystemExit(
+            "Weight surface is all zero after the low-statistics guards; "
+            "lower --min-rec or raise --wclip-pct.")
+    return W
 
 
 def finalize_and_write(W, name, cfg, args, x_edges, y_edges, label=""):
@@ -475,143 +537,34 @@ def build_from_data_hist(args, cfg, name):
           f"net signal={net:.0f} (clipped {int((counts < 0).sum())} negative bins)")
 
     # --- denominator g: reconstructed sim (--rec, reco-level) or LUND truth ---
+    # G is probability-normalized for the ratio; G_counts keeps the raw bin
+    # counts so apply_ratio_guards can judge which bins have enough statistics.
     if args.rec:
-        G = _load_rec_hist(args.rec, x_edges, y_edges, vnames)
+        G, G_counts = _load_rec_hist(args.rec, x_edges, y_edges, vnames)
     else:
         gx, gy = gen_xy(args.mode, args.mc)
         gx = np.asarray(gx, dtype=float)
         gy = np.asarray(gy, dtype=float)
         finite = np.isfinite(gx) & np.isfinite(gy)
-        G, _, _ = np.histogram2d(gx[finite], gy[finite], bins=[x_edges, y_edges])
-        if G.sum() <= 0:
+        G_counts, _, _ = np.histogram2d(gx[finite], gy[finite],
+                                        bins=[x_edges, y_edges])
+        if G_counts.sum() <= 0:
             raise SystemExit("No MC points fell inside the data-hist edges.")
-        G = G / G.sum()
+        G = G_counts / G_counts.sum()
 
     # rejection weight w = d / g; empty MC bins are unreachable -> w = 0
     W = np.divide(D, G, out=np.zeros_like(D), where=G > 0.0)
     if W.max() <= 0:
         raise SystemExit("Weight surface is all zero (check --mode / edges / --mc).")
 
+    W = apply_ratio_guards(W, G_counts, args)
+
+    n_holes = int(np.sum((G_counts <= 0) & (D > 0)))
+    print(f"[data-hist] {n_holes} bins have data but no denominator "
+          "(acceptance holes -> w=0, cannot be populated).")
+
     finalize_and_write(W, name, cfg, args, x_edges, y_edges,
                        label="(sideband-subtracted target)")
-
-
-def _load_hist_npz(path, tag):
-    """Load a 2-D histogram npz (keys 'varnames','edges','counts').
-
-    Returns (varnames, x_edges, y_edges, counts). Same layout that
-    sideband_subtract_nd writes and that build_from_data_hist consumes.
-    """
-    npz    = np.load(path, allow_pickle=True)
-    vnames = [str(v) for v in npz["varnames"]]
-    edges  = [np.asarray(e, dtype=float) for e in npz["edges"]]
-    if len(edges) != 2:
-        raise SystemExit(f"{tag} {path}: expected a 2-D histogram, got "
-                         f"{len(edges)}-D (vars={vnames}).")
-    counts = np.asarray(npz["counts"], dtype=float)
-    return vnames, edges[0], edges[1], counts
-
-
-def build_from_rec_hist(args, cfg, name):
-    """
-    Weight surface  w = N_sub / N_rec  for RECO-level matching.
-
-    Numerator   : sideband-subtracted DATA histogram (--data-hist .npz, keys
-                  'counts'+'edges' from sideband_subtract_nd).
-    Denominator : RECONSTRUCTED simulation on the SAME edges (--rec), i.e. the
-                  reco of the unweighted baseline generator that will be
-                  reweighted. Sourced from a pre-binned .npz (same keys;
-                  recommended, so the reco selection matches the notebook
-                  exactly) or from a reco .root/.csv histogrammed on the
-                  numerator edges.
-
-    Unlike build_from_data_hist (w = d/g against the THROWN generator, which
-    makes the *thrown* spectrum match data), this divides by the RECONSTRUCTED
-    sim so that AFTER GEMC + reconstruction the reweighted sim matches the
-    subtracted data. It folds the inverse acceptance (1/eps) into the weight:
-    reco_weighted = w * g * eps = (N_sub / N_rec) * N_rec = N_sub, under the
-    assumption of ~diagonal bin migration (thrown bin ~= reco bin). If
-    migration is non-negligible, iterate: generate -> reconstruct -> recompute
-    N_sub/N_rec (-> 1 at closure) -> multiply into the weight -> repeat.
-    """
-    import array as _arr
-
-    # --- numerator: sideband-subtracted data ---
-    _, x_edges, y_edges, counts = _load_hist_npz(args.data_hist, "[data-hist]")
-    nx, ny = len(x_edges) - 1, len(y_edges) - 1
-    net = counts.sum()
-    D = np.clip(counts, 0.0, None)                 # no negative density
-    if D.sum() <= 0:
-        raise SystemExit("Subtracted data histogram is <= 0 after clipping.")
-
-    # --- denominator: reconstructed sim on the SAME edges ---
-    if args.rec.endswith(".npz"):
-        _, rxe, rye, R = _load_hist_npz(args.rec, "[rec-hist]")
-        if not (np.allclose(rxe, x_edges) and np.allclose(rye, y_edges)):
-            raise SystemExit("--rec edges do not match --data-hist edges; "
-                             "rebuild both on the same binning.")
-        R = np.clip(R, 0.0, None)                  # counts, but guard anyway
-    else:
-        cuts = [parse_cut(c) for c in args.cut]
-        rx, ry = load_source(args.rec, args.tree, args.mode, cuts, "rec")
-        rx = np.asarray(rx, dtype=float)
-        ry = np.asarray(ry, dtype=float)
-        fin = np.isfinite(rx) & np.isfinite(ry)
-        R, _, _ = np.histogram2d(rx[fin], ry[fin], bins=[x_edges, y_edges])
-    if R.sum() <= 0:
-        raise SystemExit("Reconstructed-sim histogram is empty on these edges.")
-
-    # probability-normalize both, then w = N_sub / N_rec (overall constant is
-    # absorbed by the max=1 rescale below).
-    Dn = D / D.sum()
-    Rn = R / R.sum()
-    W  = np.divide(Dn, Rn, out=np.zeros_like(Dn), where=Rn > 0.0)
-
-    # A low-statistics reco bin (tiny N_rec) produces a runaway ratio that,
-    # after the max=1 rescale, sets wmax and crushes every other weight -- this
-    # tanks the accept-reject efficiency AND spikes the thrown output into that
-    # one bin. Guard with a minimum-N_rec floor and/or a cap on the raw ratio.
-    nz = W > 0
-    if args.min_rec > 0:
-        killed = int(np.sum(nz & (R < args.min_rec)))
-        W[R < args.min_rec] = 0.0                  # ratio not trustworthy -> drop
-        nz = W > 0
-        print(f"[rec-hist] min-rec={args.min_rec:g}: zeroed {killed} bins with "
-              f"N_rec below threshold.")
-    cap = None
-    if args.wmax is not None:
-        cap = float(args.wmax)
-    elif args.wclip_pct is not None and nz.any():
-        cap = float(np.percentile(W[nz], args.wclip_pct))
-    if cap is not None:
-        n_clip = int(np.sum(W > cap))
-        W = np.minimum(W, cap)
-        print(f"[rec-hist] clipped {n_clip} bins at raw-ratio cap={cap:.4g}.")
-
-    wpk = W.max()
-    if wpk <= 0:
-        raise SystemExit("Weight surface is all zero (check --rec / edges).")
-    W /= wpk                                        # accept-reject prob in [0,1]
-
-    n_holes = int(np.sum((R <= 0) & (D > 0)))
-    print(f"[rec-hist] w = N_sub/N_rec normalized: max=1.0, mean={W.mean():.3f}, "
-          f"zero-fraction={float(np.mean(W <= 0.0)):.3f}")
-    print(f"[rec-hist] net signal={net:.0f}, clipped {int((counts < 0).sum())} "
-          f"negative data bins; {n_holes} bins have data but no reco-sim "
-          f"(acceptance holes -> w=0, cannot be populated).")
-
-    h = ROOT.TH2D(name, cfg["title"],
-                  nx, _arr.array('d', x_edges),
-                  ny, _arr.array('d', y_edges))
-    for ix in range(nx):
-        for iy in range(ny):
-            h.SetBinContent(ix + 1, iy + 1, float(W[ix, iy]))
-
-    tf = ROOT.TFile(args.out, "RECREATE")
-    h.Write()
-    tf.Close()
-    print(f"[rec-hist] wrote {args.out}:{name}  mode={args.mode}  "
-          f"grid={nx}x{ny}  (reco-level N_sub/N_rec target)")
 
 
 def main():
@@ -657,6 +610,18 @@ def main():
                          "w = D_subtracted / R_reconstructed is a RECO-level "
                          "weight. Preferred over --mc for --data-hist; requires "
                          "--data-hist.")
+    ap.add_argument("--min-rec", type=float, default=25.0,
+                    help="Zero any bin whose DENOMINATOR holds fewer than this "
+                         "many raw counts. Such a bin gives a d/g ratio with "
+                         "100%%-level error that typically sets the surface "
+                         "maximum and craters the accept-reject keep fraction. "
+                         "5-10 is a reasonable floor; 0 (default) disables.")
+    ap.add_argument("--wmax", type=float, default=None,
+                    help="Hard cap on the raw d/g ratio before the max=1 "
+                         "rescale. Takes precedence over --wclip-pct.")
+    ap.add_argument("--wclip-pct", type=float, default=None,
+                    help="Cap the raw d/g ratio at this percentile of the "
+                         "nonzero bins (e.g. 99). Ignored when --wmax is set.")
     ap.add_argument("--prev", default=None,
                     help="Previous CUMULATIVE weight ROOT file (same TH2D name "
                          "and identical binning). The new d/g correction is "
@@ -713,13 +678,16 @@ def main():
     # --- denominator: proposal/gen density g(x, y) ---
     if args.mc:
         gx, gy = gen_xy(args.mode, args.mc)
-        G, _ = hist_density(gx, gy,
-                            x_lo, x_hi, y_lo, y_hi, args.nx, args.ny, "mc")
+        G, n_mc = hist_density(gx, gy,
+                               x_lo, x_hi, y_lo, y_hi, args.nx, args.ny, "mc")
+        G_counts = G * n_mc            # raw counts back out, for --min-rec
     else:
         # Explicit uniform proposal: every bin equally probable.
         print("[hist] --mc not given: assuming a FLAT (uniform) proposal g. "
               "This is only valid if the generator samples (x,y) uniformly.")
         G = np.full((args.nx, args.ny), 1.0 / (args.nx * args.ny))
+        # An analytic proposal has no sampling error, so no bin is low-stat.
+        G_counts = np.full((args.nx, args.ny), np.inf)
 
     # --- rejection weight w = d / g, guarding the 0/0 in empty MC bins ---
     # An empty MC bin means the proposal never reaches that region, so no
@@ -727,6 +695,8 @@ def main():
     W = np.where(G > 0.0, D / G, 0.0)
     if W.max() <= 0:
         raise SystemExit("Weight surface is all zero (check ranges / inputs).")
+
+    W = apply_ratio_guards(W, G_counts, args)
 
     x_edges = np.linspace(x_lo, x_hi, args.nx + 1)
     y_edges = np.linspace(y_lo, y_hi, args.ny + 1)
