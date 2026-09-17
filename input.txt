@@ -1,5 +1,5 @@
 # This is the beginning of adding in an input file for the event generator class
-num_events:     1000000
+num_events:     100000
 beam_energy:    10.2
 W_min:          2.85
 target_pid:     2212
@@ -13,8 +13,32 @@ gen_plots:      1
 reaction:       2212, 9999: 9999, 2212, -2212
 mass_9999: BW 2. 0.4
 
-# Continuous w(Q2, E') surface built from real data by build_weight_func.py
+# Continuous w(Q2, E') surface. Built OUTSIDE this generator, by either
+#   reweight/build_xsec_weight.py   -- from a cross section you supply
+#   reweight/build_weight_func.py   -- from measured data / MC ratio
+# The generator just loads the TH2D and evaluates it with TH2::Interpolate.
 # Format:  weight_func: <root file> [<hist name>]
 # Hist name defaults to "w_Q2_Ep" if omitted.
-weight_func: weight_func.root w_Q2_Ep
+#
+#   cd reweight && python build_xsec_weight.py --input-card ../input.txt \
+#       --formula "Gamma * exp(-2.0 * (W - 2.85))" --out ../weight_func.root
+# weight_func: weight_func.root w_Q2_Ep
 # mom_weight: mom_weight.root w_pp
+
+# 3-D cross-section weight w(Q2, W, M_X), built by
+# reweight/build_xsec_weight3d.py. M_X is the invariant mass of the
+# intermediate from the first vertex -- M_ppbar for the reaction above.
+# Applied as a THIRD accept-reject, after the decay chain, since M_X does
+# not exist at electron-sampling time.
+#   Format:  xsec_weight: <root file> [<hist name>]   (default w_Q2_W_M)
+#            xsec_weight_mode: bin | interp           (default bin)
+# `bin` looks up the bin the event falls in -- the right pairing for a
+# BINNED cross section. `interp` trilinearly interpolates and, on a coarse
+# grid, pulls the result well away from the cross section it was built from.
+# xsec_weight: xsec_weight.root w_Q2_W_M
+# xsec_weight_mode: bin
+
+# Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e). Needed to measure
+# the proposal density for build_xsec_weight3d.py (the 3-D proposal is not
+# flat), and read by reweight/plot_xsec_closure.py for the closure plots.
+# truth_ntuple: gen_truth.root

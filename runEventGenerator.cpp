@@ -213,6 +213,36 @@ struct ReadInput {
     // of the Q2/E' weight above. Normalized so that max(w) = 1.
     std::string mom_weight_file;
     std::string mom_weight_name = "w_pp";
+    // Continuous 3-D cross-section weight w(Q2, W, M_X) built by
+    // build_xsec_weight3d.py. A TH3D whose axes are the four-momentum
+    // transfer, the hadronic invariant mass, and the invariant mass of the
+    // intermediate X from the FIRST vertex (for
+    // `reaction: 2212, 9999: 9999, 2212, -2212` that is M_ppbar).
+    // Like mom_weight this is a SECOND accept-reject applied AFTER the full
+    // decay chain, because M_X does not exist until the intermediate mass
+    // has been sampled. Evaluated with TH3::Interpolate (trilinear ->
+    // continuous). Normalized so that max(w) = 1 (keep with prob w).
+    std::string xsec_weight_file;
+    std::string xsec_weight_name = "w_Q2_W_M";
+    // How to read the 3-D weight: "bin" (default) looks up the bin the event
+    // falls in; "interp" trilinearly interpolates between bin centers.
+    // "bin" is the correct pairing for a BINNED cross section. The weight is
+    // built as a per-bin ratio d/g, so applying it per bin makes the
+    // accepted density exactly proportional to d in every bin. Interpolating
+    // blends neighbouring bins into each event's accept probability, which
+    // on a coarse grid pulls the result away from the cross section it was
+    // built from -- measurably so: on a 4x9x24 grid it costs ~25% per bin.
+    // Use "interp" only when the underlying cross section really is smooth
+    // and the binning is fine enough that the two agree.
+    bool xsec_weight_interp = false;
+    // Optional truth ntuple: one row per ACCEPTED event holding
+    // (Q2, W, M_X, Ep, theta_e). This is the generator's own proposal
+    // density g in exactly the variables the 3-D weight uses -- it cannot
+    // be recovered from the LUND file, where the two protons are
+    // interchangeable and M_X is ambiguous. build_xsec_weight3d.py reads it
+    // as the denominator, and plot_xsec_closure.py as the generated
+    // distribution to compare against the cross section.
+    std::string truth_ntuple_file;
 };
 
 // Two-body decay result
@@ -320,6 +350,23 @@ ReadInput readInputFile(const string &filename) {
             iss >> fname;
             if (iss >> hname) input.mom_weight_name = hname;
             input.mom_weight_file = fname;
+        } else if (key == "xsec_weight") {
+            // xsec_weight: path/to/file.root  [hist_name]
+            std::string fname, hname;
+            iss >> fname;
+            if (iss >> hname) input.xsec_weight_name = hname;
+            input.xsec_weight_file = fname;
+        } else if (key == "xsec_weight_mode") {
+            // xsec_weight_mode: bin | interp
+            std::string val; iss >> val;
+            input.xsec_weight_interp = (val == "interp");
+            if (val != "interp" && val != "bin") {
+                cerr << "WARNING: unrecognized xsec_weight_mode '" << val
+                     << "'; using bin." << endl;
+            }
+        } else if (key == "truth_ntuple") {
+            // truth_ntuple: path/to/file.root
+            iss >> input.truth_ntuple_file;
         } else if (key == "data_hist") {
             // data_hist: path/to/file.root  [hist_name]
             std::string fname, hname;
@@ -997,6 +1044,60 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     std::vector<TLorentzVector> accepted_scattered;
     std::vector<TLorentzVector> accepted_W;
 
+    // Optional 3-D cross-section weight w(Q2, W, M_X): a second
+    // accept-reject applied once the whole event exists. M_X is only known
+    // after the intermediate mass has been sampled and the chain decayed,
+    // so unlike weight_func this cannot act at electron-sampling time.
+    TH3D *xsec_weight = nullptr;
+    TFile *xsec_weight_tf = nullptr;
+    if (!input.xsec_weight_file.empty()) {
+        xsec_weight_tf = TFile::Open(input.xsec_weight_file.c_str(), "READ");
+        if (!xsec_weight_tf || xsec_weight_tf->IsZombie()) {
+            cerr << "ERROR: cannot open xsec_weight file "
+                 << input.xsec_weight_file << endl;
+        } else {
+            xsec_weight = dynamic_cast<TH3D*>(
+                xsec_weight_tf->Get(input.xsec_weight_name.c_str()));
+            if (!xsec_weight) {
+                cerr << "ERROR: TH3D '" << input.xsec_weight_name
+                     << "' not found in " << input.xsec_weight_file << endl;
+            } else {
+                cout << "Cross-section weight enabled: "
+                     << input.xsec_weight_file << ":"
+                     << input.xsec_weight_name << "  ("
+                     << (input.xsec_weight_interp
+                             ? "trilinear Interpolate"
+                             : "per-bin lookup")
+                     << " on Q2, W, M_X)" << endl;
+            }
+        }
+    }
+
+    // Optional truth ntuple. Opened AFTER every histogram above has been
+    // constructed, so none of them end up owned by this file and deleted
+    // when it closes.
+    TFile *truth_tf = nullptr;
+    TTree *truth_tree = nullptr;
+    double nt_Q2 = 0, nt_W = 0, nt_M = 0, nt_Ep = 0, nt_theta = 0;
+    if (!input.truth_ntuple_file.empty()) {
+        truth_tf = TFile::Open(input.truth_ntuple_file.c_str(), "RECREATE");
+        if (!truth_tf || truth_tf->IsZombie()) {
+            cerr << "ERROR: cannot open truth_ntuple file "
+                 << input.truth_ntuple_file << " for writing." << endl;
+            truth_tf = nullptr;
+        } else {
+            truth_tf->cd();
+            truth_tree = new TTree("truth", "generator truth per accepted event");
+            truth_tree->Branch("Q2",      &nt_Q2,    "Q2/D");
+            truth_tree->Branch("W",       &nt_W,     "W/D");
+            truth_tree->Branch("M",       &nt_M,     "M/D");
+            truth_tree->Branch("Ep",      &nt_Ep,    "Ep/D");
+            truth_tree->Branch("theta_e", &nt_theta, "theta_e/D");
+            cout << "Truth ntuple enabled: " << input.truth_ntuple_file
+                 << ":truth  (Q2, W, M, Ep, theta_e)" << endl;
+        }
+    }
+
     // Rejection counters for diagnostics
     long long n_attempts           = 0;
     long long n_reject_electron    = 0;
@@ -1004,6 +1105,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     long long n_reject_decay       = 0;
     long long n_reject_finalcheck  = 0;
     long long n_reject_mom         = 0;
+    long long n_reject_xsec        = 0;
 
     const int target_events = input.num_events;
     const int progress_step = std::max(1, target_events / 10);
@@ -1101,6 +1203,69 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             if (gen.rnd.Uniform() > w)         { ++n_reject_mom; continue; }
         }
 
+        // -------------------------------------------------------------
+        // Third accept-reject stage: 3-D cross-section weight
+        // w(Q2, W, M_X).  M_X is the invariant mass of the intermediate X
+        // from the first vertex -- for the ppbar reaction that is M_ppbar.
+        // It is taken from the TRUTH 4-vector p2_lab rather than rebuilt
+        // from the final state: the event holds two protons and picking
+        // the one that came from X is ambiguous downstream, while here it
+        // is exact by construction.
+        // -------------------------------------------------------------
+        const double ev_Q2 = -v_virtual.M2();
+        const double ev_W  = v_W.M();
+        const double ev_M  = p2_lab.M();
+        if (xsec_weight) {
+            const TAxis *xa = xsec_weight->GetXaxis();
+            const TAxis *ya = xsec_weight->GetYaxis();
+            const TAxis *za = xsec_weight->GetZaxis();
+
+            // Outside the histogram RANGE the cross section says nothing,
+            // so reject: that is the domain the user asked for.
+            if (ev_Q2 <= xa->GetXmin() || ev_Q2 >= xa->GetXmax() ||
+                ev_W  <= ya->GetXmin() || ev_W  >= ya->GetXmax() ||
+                ev_M  <= za->GetXmin() || ev_M  >= za->GetXmax()) {
+                ++n_reject_xsec; continue;
+            }
+
+            double w3;
+            if (!input.xsec_weight_interp) {
+                // Piecewise-constant lookup: the event takes the weight of
+                // the bin it lands in. The weight is a per-bin ratio d/g,
+                // so this makes the accepted density proportional to d bin
+                // by bin -- exact closure, by construction.
+                w3 = xsec_weight->GetBinContent(xa->FindBin(ev_Q2),
+                                                ya->FindBin(ev_W),
+                                                za->FindBin(ev_M));
+            } else {
+                // Inside the range but within half a bin of an edge, TH3::
+                // Interpolate returns 0 -- it only interpolates inside the
+                // hull of the BIN CENTERS. On a coarse axis that is a large
+                // slice of the range (with 4 Q2 bins over [1,7] it silently
+                // discards Q2 < 1.5 and Q2 > 5.75), so clamp into the hull.
+                double q = std::min(std::max(ev_Q2, xa->GetBinCenter(1)),
+                                    xa->GetBinCenter(xa->GetNbins()));
+                double ww = std::min(std::max(ev_W, ya->GetBinCenter(1)),
+                                     ya->GetBinCenter(ya->GetNbins()));
+                double mm = std::min(std::max(ev_M, za->GetBinCenter(1)),
+                                     za->GetBinCenter(za->GetNbins()));
+                w3 = xsec_weight->Interpolate(q, ww, mm);
+            }
+            if (!std::isfinite(w3) || w3 <= 0.0) { ++n_reject_xsec; continue; }
+            if (gen.rnd.Uniform() > w3)          { ++n_reject_xsec; continue; }
+        }
+
+        // Truth row for the ACCEPTED event: the generator's own density in
+        // the weighting variables, after every accept-reject stage.
+        if (truth_tree) {
+            nt_Q2    = ev_Q2;
+            nt_W     = ev_W;
+            nt_M     = ev_M;
+            nt_Ep    = v_scattered.E();
+            nt_theta = v_scattered.Theta() * TMath::RadToDeg();
+            truth_tree->Fill();
+        }
+
         all_final_particles.push_back(final_particles);
         accepted_scattered.push_back(v_scattered);
         accepted_W.push_back(v_W);
@@ -1194,7 +1359,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     // Print rejection diagnostics
     long long n_rejected_total = n_reject_electron + n_reject_mass
                                + n_reject_decay + n_reject_finalcheck
-                               + n_reject_mom;
+                               + n_reject_mom + n_reject_xsec;
     cout << "\nFinished processing decays." << endl;
     cout << "  Requested events:         " << target_events << endl;
     cout << "  Total attempts:           " << n_attempts << endl;
@@ -1205,10 +1370,28 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     cout << "    - decay failures:       " << n_reject_decay << endl;
     cout << "    - final-state checks:   " << n_reject_finalcheck << endl;
     cout << "    - momentum weight:      " << n_reject_mom << endl;
+    cout << "    - cross-section weight: " << n_reject_xsec << endl;
     if (n_attempts > 0) {
         cout << "  Acceptance rate:          "
              << std::fixed << std::setprecision(2)
              << 100.0 * all_final_particles.size() / n_attempts << "%" << endl;
+    }
+
+    // -----------------------------------------------------
+    // Write the truth ntuple (before the LUND file, so a crash in the
+    // writer below still leaves a usable density for the weight builder).
+    // gROOT->cd() afterwards: Close() leaves gDirectory dangling, and the
+    // plotting section further down creates canvases.
+    // -----------------------------------------------------
+    if (truth_tf && truth_tree) {
+        truth_tf->cd();
+        truth_tree->Write();
+        cout << "Written " << truth_tree->GetEntries()
+             << " rows to " << input.truth_ntuple_file << ":truth" << endl;
+        truth_tf->Close();
+        truth_tf = nullptr;
+        truth_tree = nullptr;
+        gROOT->cd();
     }
 
     // -----------------------------------------------------

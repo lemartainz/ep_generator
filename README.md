@@ -30,6 +30,12 @@ The generator is intended for **toy Monte Carlo**, acceptance studies, and backg
 - **input.txt**  
   Input card that controls the generator configuration.
 
+- **reweight/**  
+  Standalone weighting tools. They run separately from the generator and
+  hand it a weight surface through the `weight_func:` line of the input
+  card — `build_xsec_weight.py` builds one from a cross section,
+  `build_weight_func.py` from measured data. See [Weighting](#weighting).
+
 ---
 
 ## Requirements
@@ -74,6 +80,19 @@ Any lines beginning with # are ignored.
 | print_debug | Print debug information                        | int (0 / 1) |
 | reaction    | Wanted reaction string                         | string     |
 
+### Optional Parameters
+
+| Key         | Description                                   | Type       |
+|-------------|-----------------------------------------------|------------|
+| weight_func | Weight surface `w(Q^2, E')` applied at electron-sampling time: `<root file> [<hist name>]` (name defaults to `w_Q2_Ep`) | string |
+| mom_weight  | Weight surface `w(p_lead, p_sub)` applied as a second accept-reject after the event is built | string |
+| xsec_weight | 3-D weight surface `w(Q^2, W, M_X)` applied as a third accept-reject after the decay chain: `<root file> [<hist name>]` (name defaults to `w_Q2_W_M`) | string |
+| xsec_weight_mode | How to read that TH3D: `bin` (default, per-bin lookup) or `interp` (trilinear) | string |
+| truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e)` to this ROOT file | string |
+
+Both are built by a **separate** script and simply loaded here — see
+[Weighting](#weighting).
+
 ## Reaction
 If you want to decay multiple particles just have to separate using :
 Lets say you want the reaction ep->XZ->XWY
@@ -90,6 +109,81 @@ The first two are always assumed to be some final state particle (X) and an inte
 6. **Output/diagnostics:** Optionally writes LUND output and fills ROOT histograms/plots.
 
 ---
+
+## Weighting
+
+Weights are **not** built by the generator. A separate script writes a
+`TH2D` of accept probabilities to a ROOT file; the generator loads it once
+and evaluates it with `TH2::Interpolate` — bilinear interpolation between
+bin centers, i.e. a continuous `w(Q^2, E')` — keeping each sampled
+electron with probability `w`. The handoff is one line in `input.txt`:
+
+```
+weight_func: weight_func.root w_Q2_Ep
+```
+
+Two builders write that file, and they are interchangeable from the
+generator's point of view:
+
+- **From a cross section** — `reweight/build_xsec_weight.py`. Needs
+  nothing but the input card. The generator samples `Q^2` and `E'`
+  uniformly, so its proposal density is flat and the accept probability is
+  just the cross section rescaled to a maximum of 1.
+
+  ```bash
+  cd reweight
+  python build_xsec_weight.py \
+      --input-card ../input.txt \
+      --formula "Gamma * exp(-2.0 * (W - 2.85))" \
+      --out ../weight_func.root
+  ```
+
+  The cross section can also come from your own Python function
+  (`--xsec-py file.py:func`) or a table of measured points
+  (`--table xsec.csv`), and `--diff` converts one quoted in
+  `dsigma/dOmega dE'`, `dsigma/dx dQ^2` or `dsigma/dW dQ^2` into the
+  `dQ^2 dE'` the generator needs.
+
+- **From data** — `reweight/build_weight_func.py`. Builds the same surface
+  as a data/MC ratio, for correcting a run toward measured distributions.
+
+### 3-D cross sections
+
+A cross section that is 3-D in `(Q^2, W, M)` — where `M` is the invariant
+mass of the intermediate `X` from the first vertex — cannot be applied at
+electron-sampling time, because `M` does not exist until the intermediate
+mass has been sampled and the chain decayed. It is a **third**
+accept-reject stage in the main loop, configured with `xsec_weight:` and
+built by `reweight/build_xsec_weight3d.py`:
+
+```bash
+# 1. unweighted run with `truth_ntuple: gen_truth.root` in the card
+# 2. build the TH3D
+cd reweight
+python build_xsec_weight3d.py --xsec ../pseudo_xsec.npz \
+    --gen gen_truth.root --out ../xsec_weight.root
+# 3. add `xsec_weight: xsec_weight.root w_Q2_W_M` and rerun
+```
+
+Unlike the 2-D case the proposal density is **not** flat here, so it has to
+be measured — hence `truth_ntuple:`, which records `M` from the truth
+4-vector (the LUND file's two protons are interchangeable, so `M` is
+ambiguous downstream). `reweight/plot_xsec_closure.py` then overlays the
+generated distribution on the cross section with a ratio panel per bin.
+With per-bin lookup the weighted events match the cross section **exactly**
+(up to Poisson noise) — measured at rms pull 1.02 and 2.2% median
+deviation over all delivered cells. Ratio clipping would break that
+permanently, so it is off by default; use `--min-gen` (or
+`--target-accuracy`) instead, and run `--scan` to see what it costs.
+
+See [reweight/README_reweight.md](reweight/README_reweight.md) for the
+full workflow and the traps (per-bin vs interpolated lookup, denominator
+statistics, proposal overlap, and cross section placed outside the
+acceptance).
+
+Inspect a surface before running with
+`python reweight/plot_weight.py weight_func.root w_Q2_Ep`. Full details in
+[reweight/README_reweight.md](reweight/README_reweight.md).
 
 ## Example usage
 
@@ -143,7 +237,8 @@ reaction: 2212, 1000: 1000, 211, -211
 
 ## Limitations
 
-- Uniform kinematic sampling (not a physics cross‑section).  
+- Uniform kinematic sampling by default; supply a cross section via
+  `weight_func:` to sample a physics distribution (see [Weighting](#weighting)).  
 - Simple phase‑space decays; no detector effects.  
 - Placeholder PDG codes require user‑defined masses.  
 - No flag added to set RNG seed.  
