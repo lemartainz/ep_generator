@@ -49,6 +49,28 @@ def eval_st(expr, S, T):
     return np.broadcast_to(np.asarray(val, float), S.shape).astype(float)
 
 
+def table_at(spec, S, T):
+    """Evaluate a dsigma/dt TH2D the way the generator does (clamped
+    bilinear between bin centers; exp() for a log table)."""
+    import uproot
+    from build_dsdt_table import table_lookup
+    path, _, hist = spec.partition(":")
+    f = uproot.open(path)
+    if not hist:
+        names = [k.split(";")[0] for k in f.keys()]
+        if len(names) != 1:
+            raise SystemExit(f"--table {path}: give the hist name, has {names}")
+        hist = names[0]
+    D, s_edges, t_edges = f[hist].to_numpy()
+    val = table_lookup(D, s_edges, t_edges, S, T)
+    if hist.startswith("log_"):
+        val = np.exp(val)
+    # outside the axis range the generator gives 0 (Surface2D::covers)
+    inside = ((S > s_edges[0]) & (S < s_edges[-1]) &
+              (T > t_edges[0]) & (T < t_edges[-1]))
+    return np.where(inside, val, 0.0)
+
+
 def main():
     ap = argparse.ArgumentParser(description="t distribution with and "
                                  "without the carried ratio weight.")
@@ -63,7 +85,15 @@ def main():
                          "the input ratio")
     ap.add_argument("--formula-den", default=None,
                     help="separate denominator model (default: --formula at s_pp)")
+    ap.add_argument("--table", default=None,
+                    help="input dsigma/dt table file.root[:hist] (the one the "
+                         "run used), to overlay the input ratio; log tables "
+                         "are recognised by a hist name starting with log_")
+    ap.add_argument("--table-den", default=None,
+                    help="separate denominator table file.root[:hist]")
     args = ap.parse_args()
+    if args.formula and args.table:
+        raise SystemExit("give --formula or --table, not both")
 
     import uproot
     if not os.path.exists(args.gen):
@@ -83,10 +113,16 @@ def main():
         den = eval_st(args.formula_den or args.formula, a["s_pp"][ok], t)
         with np.errstate(divide="ignore", invalid="ignore"):
             w_in = np.where(den > 0, num / den, 0.0)
+    elif args.table:
+        num = table_at(args.table, a["s_pbarp"][ok], t)
+        den = table_at(args.table_den or args.table, a["s_pp"][ok], t)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w_in = np.where(den > 0, num / den, 0.0)
+    if w_in is not None:
         good = (w > 0) & (w_in > 0)
         rel = np.abs(w[good] / w_in[good] - 1.0)
         print(f"[input] per-event |w_gen/w_input - 1|: median {np.median(rel):.2e} "
-              f"max {rel.max():.2e}  (generator {'formula' if rel.max() < 1e-9 else 'table'} path)")
+              f"max {rel.max():.2e}")
     if np.all(w == 1.0):
         print("[warn] w_ratio == 1 for every event: this run carried no ratio "
               "weight. The plot will show a flat ratio.")
@@ -139,7 +175,7 @@ def main():
 
     if w_in is not None:
         ax1.step(edges, np.r_[mean_in, mean_in[-1]], where="post", color="k",
-                 lw=1.8, label="input ratio (from --formula, same t bins)")
+                 lw=1.8, label="input ratio (from --formula / --table, same t bins)")
     ax1.errorbar(c, mean_w, yerr=err_w, fmt="o", ms=3, color="C3",
                  label=r"extracted: weighted / unweighted  $= \langle w_{ratio}\rangle(t)$")
     ax1.plot(c, shape_ratio, "-", color="C0", lw=1.2,
