@@ -13,10 +13,12 @@ gen_plots:      1
 reaction:       2212, 9999: 9999, 2212, -2212
 mass_9999: BW 2. 0.4
 
+# ---- Weighting (all keys below are read by EventWeighter.h, not the
+# ---- generator; see WeightConfig::parseKey) ----
 # Continuous w(Q2, E') surface. Built OUTSIDE this generator, by either
 #   reweight/build_xsec_weight.py   -- from a cross section you supply
 #   reweight/build_weight_func.py   -- from measured data / MC ratio
-# The generator just loads the TH2D and evaluates it with TH2::Interpolate.
+# EventWeighter just loads the TH2D and evaluates it with TH2::Interpolate.
 # Format:  weight_func: <root file> [<hist name>]
 # Hist name defaults to "w_Q2_Ep" if omitted.
 #

@@ -13,6 +13,8 @@
 #include <TGenPhaseSpace.h>
 #include <TLegend.h>
 
+#include "EventWeighter.h"
+
 #include <vector>
 #include <iostream>
 #include <fstream>
@@ -197,44 +199,10 @@ struct ReadInput {
     // TH3::GetRandom3 instead of the uniform Q2/E/theta ranges above.
     std::string data_hist_file;
     std::string data_hist_name = "h_data";
-    // Continuous weight function w(Q2, E') = data / gen (data density
-    // divided by the generator's proposal density), built by
-    // build_weight_func.py. A TH2D stored in a ROOT file; the generator
-    // evaluates it with TH2::Interpolate (bilinear -> continuous) and uses
-    // the value as an accept-reject probability on top of uniform Q2/E'
-    // sampling. Normalized so that max(w) = 1 (keep with prob w).
-    std::string weight_func_file;
-    std::string weight_func_name = "w_Q2_Ep";
-    // Continuous momentum weight w(p_lead, p_sub) = data / gen over the
-    // leading / sub-leading proton (2212 only) momentum magnitudes, built by
-    // build_weight_func.py --mode pmom. A TH2D (axes: p_lead, p_sub [GeV]).
-    // Applied as a SECOND accept-reject AFTER the full event is built (the
-    // proton momenta only exist once the whole decay chain is done), on top
-    // of the Q2/E' weight above. Normalized so that max(w) = 1.
-    std::string mom_weight_file;
-    std::string mom_weight_name = "w_pp";
-    // Continuous 3-D cross-section weight w(Q2, W, M_X) built by
-    // build_xsec_weight3d.py. A TH3D whose axes are the four-momentum
-    // transfer, the hadronic invariant mass, and the invariant mass of the
-    // intermediate X from the FIRST vertex (for
-    // `reaction: 2212, 9999: 9999, 2212, -2212` that is M_ppbar).
-    // Like mom_weight this is a SECOND accept-reject applied AFTER the full
-    // decay chain, because M_X does not exist until the intermediate mass
-    // has been sampled. Evaluated with TH3::Interpolate (trilinear ->
-    // continuous). Normalized so that max(w) = 1 (keep with prob w).
-    std::string xsec_weight_file;
-    std::string xsec_weight_name = "w_Q2_W_M";
-    // How to read the 3-D weight: "bin" (default) looks up the bin the event
-    // falls in; "interp" trilinearly interpolates between bin centers.
-    // "bin" is the correct pairing for a BINNED cross section. The weight is
-    // built as a per-bin ratio d/g, so applying it per bin makes the
-    // accepted density exactly proportional to d in every bin. Interpolating
-    // blends neighbouring bins into each event's accept probability, which
-    // on a coarse grid pulls the result away from the cross section it was
-    // built from -- measurably so: on a 4x9x24 grid it costs ~25% per bin.
-    // Use "interp" only when the underlying cross section really is smooth
-    // and the binning is fine enough that the two agree.
-    bool xsec_weight_interp = false;
+    // Accept-reject weight surfaces (weight_func, mom_weight, xsec_weight,
+    // xsec_weight_mode). Parsed and applied by EventWeighter.h; the
+    // generator only hands the sampled kinematics over.
+    WeightConfig weights;
     // Optional truth ntuple: one row per ACCEPTED event holding
     // (Q2, W, M_X, Ep, theta_e). This is the generator's own proposal
     // density g in exactly the variables the 3-D weight uses -- it cannot
@@ -338,32 +306,8 @@ ReadInput readInputFile(const string &filename) {
         } else if (key == "gen_plots") {
             std::string val; iss >> val;
             input.gen_plots = (val == "true" || val == "1");
-        } else if (key == "weight_func") {
-            // weight_func: path/to/file.root  [hist_name]
-            std::string fname, hname;
-            iss >> fname;
-            if (iss >> hname) input.weight_func_name = hname;
-            input.weight_func_file = fname;
-        } else if (key == "mom_weight") {
-            // mom_weight: path/to/file.root  [hist_name]
-            std::string fname, hname;
-            iss >> fname;
-            if (iss >> hname) input.mom_weight_name = hname;
-            input.mom_weight_file = fname;
-        } else if (key == "xsec_weight") {
-            // xsec_weight: path/to/file.root  [hist_name]
-            std::string fname, hname;
-            iss >> fname;
-            if (iss >> hname) input.xsec_weight_name = hname;
-            input.xsec_weight_file = fname;
-        } else if (key == "xsec_weight_mode") {
-            // xsec_weight_mode: bin | interp
-            std::string val; iss >> val;
-            input.xsec_weight_interp = (val == "interp");
-            if (val != "interp" && val != "bin") {
-                cerr << "WARNING: unrecognized xsec_weight_mode '" << val
-                     << "'; using bin." << endl;
-            }
+        } else if (input.weights.parseKey(key, iss)) {
+            // weight_func / mom_weight / xsec_weight / xsec_weight_mode
         } else if (key == "truth_ntuple") {
             // truth_ntuple: path/to/file.root
             iss >> input.truth_ntuple_file;
@@ -554,7 +498,7 @@ public:
                                                 const Range &theta_range,
                                                 double W_min,
                                                 TH3D *data_hist = nullptr,
-                                                TH2D *weight_func = nullptr) {
+                                                EventWeighter *weighter = nullptr) {
         ElectroProduction event;
         event.p_beam   = TLorentzVector(0,0,beam_energy, beam_energy);
         event.p_target = TLorentzVector(0,0,0,target_mass);
@@ -585,25 +529,9 @@ public:
                 if (theta < theta_range.min || theta > theta_range.max)
                     continue;
 
-                // Continuous data-driven weighting via interpolation.
-                // weight_func is a TH2D of w = data/gen (data density over
-                // the uniform proposal density), normalized so max=1.
-                // TH2::Interpolate does bilinear interpolation between bin
-                // centers -> a smooth w(Q2,E'). Keep with probability w.
-                if (weight_func) {
-                    // clamp to the histogram's interior, otherwise
-                    // Interpolate returns 0 at the boundary
-                    double q2_lo = weight_func->GetXaxis()->GetXmin();
-                    double q2_hi = weight_func->GetXaxis()->GetXmax();
-                    double e_lo  = weight_func->GetYaxis()->GetXmin();
-                    double e_hi  = weight_func->GetYaxis()->GetXmax();
-                    if (Q2 <= q2_lo || Q2 >= q2_hi ||
-                        E_scattered <= e_lo || E_scattered >= e_hi) continue;
-
-                    double w = weight_func->Interpolate(Q2, E_scattered);
-                    if (!std::isfinite(w) || w <= 0.0) continue;
-                    if (rnd.Uniform() > w) continue; // accept-reject
-                }
+                // Optional w(Q2, E') accept-reject on the uniform proposal.
+                if (weighter && !weighter->acceptElectron(Q2, E_scattered, rnd))
+                    continue;
             }
 
             double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
@@ -633,7 +561,7 @@ public:
                              const Range &theta_range,
                              double W_min,
                              TH3D *data_hist,
-                             TH2D *weight_func,
+                             EventWeighter *weighter,
                              TLorentzVector &p_scattered_out,
                              TLorentzVector &p_virtual_out,
                              TLorentzVector &p_W_out) {
@@ -665,18 +593,9 @@ public:
                 if (theta < theta_range.min || theta > theta_range.max)
                     continue;
 
-                if (weight_func) {
-                    double q2_lo = weight_func->GetXaxis()->GetXmin();
-                    double q2_hi = weight_func->GetXaxis()->GetXmax();
-                    double e_lo  = weight_func->GetYaxis()->GetXmin();
-                    double e_hi  = weight_func->GetYaxis()->GetXmax();
-                    if (Q2 <= q2_lo || Q2 >= q2_hi ||
-                        E_scattered <= e_lo || E_scattered >= e_hi) continue;
-
-                    double w = weight_func->Interpolate(Q2, E_scattered);
-                    if (!std::isfinite(w) || w <= 0.0) continue;
-                    if (rnd.Uniform() > w) continue;
-                }
+                // Optional w(Q2, E') accept-reject on the uniform proposal.
+                if (weighter && !weighter->acceptElectron(Q2, E_scattered, rnd))
+                    continue;
             }
 
             double phi = rnd.Uniform(-TMath::Pi(), TMath::Pi());
@@ -959,53 +878,10 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         }
     }
 
-    // Optional continuous weight function w(Q2, E') (data-driven reshaping
-    // of the uniform sampler via accept-reject).
-    TH2D *weight_func = nullptr;
-    TFile *weight_func_tf = nullptr;
-    if (!input.weight_func_file.empty()) {
-        weight_func_tf = TFile::Open(input.weight_func_file.c_str(), "READ");
-        if (!weight_func_tf || weight_func_tf->IsZombie()) {
-            cerr << "ERROR: cannot open weight_func file "
-                 << input.weight_func_file << endl;
-        } else {
-            weight_func = dynamic_cast<TH2D*>(
-                weight_func_tf->Get(input.weight_func_name.c_str()));
-            if (!weight_func) {
-                cerr << "ERROR: TH2D '" << input.weight_func_name
-                     << "' not found in " << input.weight_func_file << endl;
-            } else {
-                cout << "Continuous weight function enabled: "
-                     << input.weight_func_file << ":"
-                     << input.weight_func_name
-                     << "  (bilinear Interpolate on Q2, E')" << endl;
-            }
-        }
-    }
-
-    // Optional momentum weight w(p_lead, p_sub): a SECOND accept-reject on the
-    // leading / sub-leading proton (2212) momenta, applied post-decay.
-    TH2D *mom_weight = nullptr;
-    TFile *mom_weight_tf = nullptr;
-    if (!input.mom_weight_file.empty()) {
-        mom_weight_tf = TFile::Open(input.mom_weight_file.c_str(), "READ");
-        if (!mom_weight_tf || mom_weight_tf->IsZombie()) {
-            cerr << "ERROR: cannot open mom_weight file "
-                 << input.mom_weight_file << endl;
-        } else {
-            mom_weight = dynamic_cast<TH2D*>(
-                mom_weight_tf->Get(input.mom_weight_name.c_str()));
-            if (!mom_weight) {
-                cerr << "ERROR: TH2D '" << input.mom_weight_name
-                     << "' not found in " << input.mom_weight_file << endl;
-            } else {
-                cout << "Momentum weight function enabled: "
-                     << input.mom_weight_file << ":"
-                     << input.mom_weight_name
-                     << "  (bilinear Interpolate on p_lead, p_sub)" << endl;
-            }
-        }
-    }
+    // Accept-reject weight surfaces (weight_func, mom_weight, xsec_weight).
+    // All the loading and evaluation lives in EventWeighter.h.
+    EventWeighter weighter(input.weights);
+    weighter.load();
 
     // Parse reaction
     auto parents   = getFirstDecayDaughters(input.reaction);
@@ -1044,35 +920,6 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     std::vector<TLorentzVector> accepted_scattered;
     std::vector<TLorentzVector> accepted_W;
 
-    // Optional 3-D cross-section weight w(Q2, W, M_X): a second
-    // accept-reject applied once the whole event exists. M_X is only known
-    // after the intermediate mass has been sampled and the chain decayed,
-    // so unlike weight_func this cannot act at electron-sampling time.
-    TH3D *xsec_weight = nullptr;
-    TFile *xsec_weight_tf = nullptr;
-    if (!input.xsec_weight_file.empty()) {
-        xsec_weight_tf = TFile::Open(input.xsec_weight_file.c_str(), "READ");
-        if (!xsec_weight_tf || xsec_weight_tf->IsZombie()) {
-            cerr << "ERROR: cannot open xsec_weight file "
-                 << input.xsec_weight_file << endl;
-        } else {
-            xsec_weight = dynamic_cast<TH3D*>(
-                xsec_weight_tf->Get(input.xsec_weight_name.c_str()));
-            if (!xsec_weight) {
-                cerr << "ERROR: TH3D '" << input.xsec_weight_name
-                     << "' not found in " << input.xsec_weight_file << endl;
-            } else {
-                cout << "Cross-section weight enabled: "
-                     << input.xsec_weight_file << ":"
-                     << input.xsec_weight_name << "  ("
-                     << (input.xsec_weight_interp
-                             ? "trilinear Interpolate"
-                             : "per-bin lookup")
-                     << " on Q2, W, M_X)" << endl;
-            }
-        }
-    }
-
     // Optional truth ntuple. Opened AFTER every histogram above has been
     // constructed, so none of them end up owned by this file and deleted
     // when it closes.
@@ -1104,8 +951,6 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     long long n_reject_mass        = 0;
     long long n_reject_decay       = 0;
     long long n_reject_finalcheck  = 0;
-    long long n_reject_mom         = 0;
-    long long n_reject_xsec        = 0;
 
     const int target_events = input.num_events;
     const int progress_step = std::max(1, target_events / 10);
@@ -1120,7 +965,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         TLorentzVector v_scattered, v_virtual, v_W;
         if (!gen.generateOneElectron(input.Q2_range, input.E_range,
                                      input.theta_range, input.W_min,
-                                     data_hist, weight_func,
+                                     data_hist, &weighter,
                                      v_scattered, v_virtual, v_W)) {
             ++n_reject_electron;
             continue;
@@ -1173,95 +1018,28 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         if (!ok) { ++n_reject_finalcheck; continue; }
 
         // -------------------------------------------------------------
-        // Second accept-reject stage: proton-momentum weight w(p_lead, p_sub).
-        // The proton momenta only exist now that the full decay chain is
-        // built, so this reshaping cannot live in generateOneElectron.
-        // Take the leading / sub-leading momentum magnitude of the two
-        // protons (pid == 2212, antiproton excluded) and keep the event
-        // with probability w (bilinear TH2::Interpolate, normalized max=1).
+        // Post-decay accept-reject (mom_weight, xsec_weight). These need
+        // the full event: the proton momenta and M_X only exist once the
+        // decay chain is built. M_X is taken from the TRUTH 4-vector
+        // p2_lab rather than rebuilt from the final state -- the event
+        // holds two protons and picking the one that came from X is
+        // ambiguous downstream, while here it is exact by construction.
         // -------------------------------------------------------------
-        if (mom_weight) {
-            double p_lead = -1.0, p_sub = -1.0; // two largest 2212 |p|
-            for (const auto& pr : final_particles) {
-                if (pr.first != 2212) continue;
-                double p = pr.second.Vect().Mag();
-                if (p > p_lead)      { p_sub = p_lead; p_lead = p; }
-                else if (p > p_sub)  { p_sub = p; }
-            }
-            if (p_sub < 0.0) { ++n_reject_mom; continue; } // need two protons
-
-            double x_lo = mom_weight->GetXaxis()->GetXmin();
-            double x_hi = mom_weight->GetXaxis()->GetXmax();
-            double y_lo = mom_weight->GetYaxis()->GetXmin();
-            double y_hi = mom_weight->GetYaxis()->GetXmax();
-            // Outside the histogram interior Interpolate returns 0 -> reject.
-            if (p_lead <= x_lo || p_lead >= x_hi ||
-                p_sub  <= y_lo || p_sub  >= y_hi) { ++n_reject_mom; continue; }
-
-            double w = mom_weight->Interpolate(p_lead, p_sub);
-            if (!std::isfinite(w) || w <= 0.0) { ++n_reject_mom; continue; }
-            if (gen.rnd.Uniform() > w)         { ++n_reject_mom; continue; }
-        }
-
-        // -------------------------------------------------------------
-        // Third accept-reject stage: 3-D cross-section weight
-        // w(Q2, W, M_X).  M_X is the invariant mass of the intermediate X
-        // from the first vertex -- for the ppbar reaction that is M_ppbar.
-        // It is taken from the TRUTH 4-vector p2_lab rather than rebuilt
-        // from the final state: the event holds two protons and picking
-        // the one that came from X is ambiguous downstream, while here it
-        // is exact by construction.
-        // -------------------------------------------------------------
-        const double ev_Q2 = -v_virtual.M2();
-        const double ev_W  = v_W.M();
-        const double ev_M  = p2_lab.M();
-        if (xsec_weight) {
-            const TAxis *xa = xsec_weight->GetXaxis();
-            const TAxis *ya = xsec_weight->GetYaxis();
-            const TAxis *za = xsec_weight->GetZaxis();
-
-            // Outside the histogram RANGE the cross section says nothing,
-            // so reject: that is the domain the user asked for.
-            if (ev_Q2 <= xa->GetXmin() || ev_Q2 >= xa->GetXmax() ||
-                ev_W  <= ya->GetXmin() || ev_W  >= ya->GetXmax() ||
-                ev_M  <= za->GetXmin() || ev_M  >= za->GetXmax()) {
-                ++n_reject_xsec; continue;
-            }
-
-            double w3;
-            if (!input.xsec_weight_interp) {
-                // Piecewise-constant lookup: the event takes the weight of
-                // the bin it lands in. The weight is a per-bin ratio d/g,
-                // so this makes the accepted density proportional to d bin
-                // by bin -- exact closure, by construction.
-                w3 = xsec_weight->GetBinContent(xa->FindBin(ev_Q2),
-                                                ya->FindBin(ev_W),
-                                                za->FindBin(ev_M));
-            } else {
-                // Inside the range but within half a bin of an edge, TH3::
-                // Interpolate returns 0 -- it only interpolates inside the
-                // hull of the BIN CENTERS. On a coarse axis that is a large
-                // slice of the range (with 4 Q2 bins over [1,7] it silently
-                // discards Q2 < 1.5 and Q2 > 5.75), so clamp into the hull.
-                double q = std::min(std::max(ev_Q2, xa->GetBinCenter(1)),
-                                    xa->GetBinCenter(xa->GetNbins()));
-                double ww = std::min(std::max(ev_W, ya->GetBinCenter(1)),
-                                     ya->GetBinCenter(ya->GetNbins()));
-                double mm = std::min(std::max(ev_M, za->GetBinCenter(1)),
-                                     za->GetBinCenter(za->GetNbins()));
-                w3 = xsec_weight->Interpolate(q, ww, mm);
-            }
-            if (!std::isfinite(w3) || w3 <= 0.0) { ++n_reject_xsec; continue; }
-            if (gen.rnd.Uniform() > w3)          { ++n_reject_xsec; continue; }
-        }
+        EventKinematics kin;
+        kin.Q2  = -v_virtual.M2();
+        kin.Ep  = v_scattered.E();
+        kin.W   = v_W.M();
+        kin.M_X = p2_lab.M();
+        kin.final_particles = &final_particles;
+        if (!weighter.acceptEvent(kin, gen.rnd)) continue;
 
         // Truth row for the ACCEPTED event: the generator's own density in
         // the weighting variables, after every accept-reject stage.
         if (truth_tree) {
-            nt_Q2    = ev_Q2;
-            nt_W     = ev_W;
-            nt_M     = ev_M;
-            nt_Ep    = v_scattered.E();
+            nt_Q2    = kin.Q2;
+            nt_W     = kin.W;
+            nt_M     = kin.M_X;
+            nt_Ep    = kin.Ep;
             nt_theta = v_scattered.Theta() * TMath::RadToDeg();
             truth_tree->Fill();
         }
@@ -1359,7 +1137,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     // Print rejection diagnostics
     long long n_rejected_total = n_reject_electron + n_reject_mass
                                + n_reject_decay + n_reject_finalcheck
-                               + n_reject_mom + n_reject_xsec;
+                               + weighter.nRejectEvent();
     cout << "\nFinished processing decays." << endl;
     cout << "  Requested events:         " << target_events << endl;
     cout << "  Total attempts:           " << n_attempts << endl;
@@ -1369,8 +1147,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     cout << "    - intermediate mass:    " << n_reject_mass << endl;
     cout << "    - decay failures:       " << n_reject_decay << endl;
     cout << "    - final-state checks:   " << n_reject_finalcheck << endl;
-    cout << "    - momentum weight:      " << n_reject_mom << endl;
-    cout << "    - cross-section weight: " << n_reject_xsec << endl;
+    weighter.printSummary(cout);
     if (n_attempts > 0) {
         cout << "  Acceptance rate:          "
              << std::fixed << std::setprecision(2)

@@ -27,6 +27,14 @@ The generator is intended for **toy Monte Carlo**, acceptance studies, and backg
 - **runEventGenerator.cpp**  
   ROOT macro containing the generator logic and the `runEventGenerator()` entry point.
 
+- **EventWeighter.h**  
+  Header-only weighting class the macro `#include`s. It owns every
+  accept-reject weight surface (`weight_func`, `mom_weight`,
+  `xsec_weight`): parsing their input-card keys, loading the ROOT
+  histograms, and deciding whether to keep an event. The generator only
+  hands over the sampled kinematics, so the weighting can be changed
+  without touching the generation code. See [Weighting](#weighting).
+
 - **input.txt**  
   Input card that controls the generator configuration.
 
@@ -47,13 +55,24 @@ The generator is intended for **toy Monte Carlo**, acceptance studies, and backg
 
 ## Quick start
 
-Place `runEventGenerator.cpp` and `input.txt` in the same directory.
+Place `runEventGenerator.cpp`, `EventWeighter.h` and `input.txt` in the
+same directory.
 
 ### Interactive mode
 
 ```bash
 root -l runEventGenerator.cpp
 ```
+
+### Compiled (ACLiC)
+
+```bash
+root -l -b -q 'runEventGenerator.cpp+("events.lund","input.txt")'
+```
+
+The `+` compiles the macro (and `EventWeighter.h`, which ACLiC tracks as a
+dependency) into `runEventGenerator_cpp.so` and reuses it until either
+file changes.
 
 ## Input File
 The generator runs entirely through an input text file. Where each non-comment line follows the format
@@ -90,8 +109,9 @@ Any lines beginning with # are ignored.
 | xsec_weight_mode | How to read that TH3D: `bin` (default, per-bin lookup) or `interp` (trilinear) | string |
 | truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e)` to this ROOT file | string |
 
-Both are built by a **separate** script and simply loaded here — see
-[Weighting](#weighting).
+All of these are built by a **separate** script and simply loaded here;
+the four weighting keys are parsed and applied by `EventWeighter.h`, not
+by the generator — see [Weighting](#weighting).
 
 ## Reaction
 If you want to decay multiple particles just have to separate using :
@@ -112,11 +132,43 @@ The first two are always assumed to be some final state particle (X) and an inte
 
 ## Weighting
 
-Weights are **not** built by the generator. A separate script writes a
-`TH2D` of accept probabilities to a ROOT file; the generator loads it once
-and evaluates it with `TH2::Interpolate` — bilinear interpolation between
-bin centers, i.e. a continuous `w(Q^2, E')` — keeping each sampled
-electron with probability `w`. The handoff is one line in `input.txt`:
+Weights are **not** built by the generator, and they are not applied by
+the generator's own code either. Everything weighting-related lives in
+`EventWeighter.h`, a header-only class the macro includes:
+
+- `WeightConfig` — the input-card side. `ReadInput` holds one, and the
+  card parser delegates any key it does not recognise to
+  `WeightConfig::parseKey`, which owns `weight_func`, `mom_weight`,
+  `xsec_weight` and `xsec_weight_mode`.
+- `EventKinematics` — what a built event looks like to the weighter:
+  `Q2`, `Ep`, `W`, `M_X` (from the truth 4-vector) and a pointer to the
+  final-state particle list.
+- `EventWeighter` — loads the ROOT histograms once and exposes two
+  accept-reject stages the generator calls:
+
+  ```cpp
+  EventWeighter weighter(input.weights);
+  weighter.load();
+  ...
+  weighter.acceptElectron(Q2, Ep, rnd);   // inside the electron sampler
+  weighter.acceptEvent(kin, rnd);         // after the full decay chain
+  weighter.printSummary(cout);            // rejection counts per surface
+  ```
+
+  It also keeps the per-stage rejection counters, so the generator's
+  main loop is a single `if (!weighter.acceptEvent(kin, gen.rnd)) continue;`.
+
+To add a new weight surface: give `WeightConfig` a file/name pair and a
+`parseKey` branch, load it in `EventWeighter::load()`, and evaluate it in
+`acceptElectron()` (if it depends only on the scattered electron) or
+`acceptEvent()` (if it needs the decayed event). `runEventGenerator.cpp`
+does not change.
+
+A separate script writes a `TH2D` of accept probabilities to a ROOT file;
+the weighter loads it once and evaluates it with `TH2::Interpolate` —
+bilinear interpolation between bin centers, i.e. a continuous
+`w(Q^2, E')` — keeping each sampled electron with probability `w`. The
+handoff is one line in `input.txt`:
 
 ```
 weight_func: weight_func.root w_Q2_Ep
@@ -248,5 +300,15 @@ reaction: 2212, 1000: 1000, 211, -211
 
 - **No events:** Check `W_min` vs your kinematic ranges.  
 - **Bad reaction string:** Ensure proper comma/colon formatting.  
-- **ROOT errors:** Verify your ROOT build matches your compiler.
+- **ROOT errors:** Verify your ROOT build matches your compiler.  
+- **ACLiC fails with `KernelKit requires -fdefine_target_os_macros` /
+  `redefinition of 'kTRUE'`:** the macOS Command Line Tools SDK is newer
+  than the clang bundled with your ROOT (seen with conda ROOT 6.28 after
+  an SDK update). Point ROOT at an older SDK that is still installed:
+
+  ```bash
+  SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX13.1.sdk root -l -b -q 'runEventGenerator.cpp+("events.lund","input.txt")'
+  ```
+
+  (`ls /Library/Developer/CommandLineTools/SDKs/` lists the candidates.)
 

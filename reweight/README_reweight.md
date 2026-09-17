@@ -1,7 +1,9 @@
 # Data-driven reweighting for the ep event generator
 
 These scripts sit **alongside** `runEventGenerator.cpp` — they do not modify
-the generator. The workflow is:
+the generator. On the generator side every weight surface is loaded and
+applied by `EventWeighter.h` (a header-only class the macro includes);
+the generation code itself never touches a weight. The workflow is:
 
 1. Run the generator as usual → `events.lund`
 2. Prepare a CSV of your **real data** with columns for the kinematic
@@ -133,10 +135,10 @@ Then add one line to `input.txt` and run the generator as usual:
 weight_func: weight_func.root w_Q2_Ep
 ```
 
-The generator loads that TH2D once and evaluates it with
-`TH2::Interpolate` — bilinear interpolation between bin centers, i.e. a
-continuous `w(Q2, E')` — keeping each sampled electron with probability
-`w`. That interpolated function *is* the handoff; nothing in
+`EventWeighter` (in `EventWeighter.h`) loads that TH2D once and evaluates
+it with `TH2::Interpolate` — bilinear interpolation between bin centers,
+i.e. a continuous `w(Q2, E')` — keeping each sampled electron with
+probability `w`. That interpolated function *is* the handoff; nothing in
 `runEventGenerator.cpp` changes.
 
 ### Why w is just the cross section
