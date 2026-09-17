@@ -305,6 +305,8 @@ python build_dsdt_table.py --formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)" \
 Offline, `w_ratio` can always be recomputed from the `t`, `s_pbarp` and
 `s_pp` branches — that is also how the table and formula paths are
 checked against each other.
+`reweight/plot_ratio_weight.py gen_truth.root` draws the `t` spectrum
+with and without the weight and their ratio, `⟨w_ratio⟩(t)`.
 
 ## Example usage
 

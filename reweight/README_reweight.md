@@ -34,6 +34,7 @@ directory so the `lund_io` / `kinematics` imports resolve.
 | `build_xsec_weight3d.py` | 3-D &sigma;(Q&sup2;, W, M) &rarr; `xsec_weight.root` (TH3D) for the generator |
 | `plot_xsec_closure.py` | Generated vs cross section with ratio panels &rarr; closure PDF |
 | `build_dsdt_table.py` | d&sigma;/dt(s, t) &rarr; `dsdt_table.root` (TH2D) for the generator's carried ratio weight |
+| `plot_ratio_weight.py` | t distribution with / without the carried ratio weight, and &lang;w_ratio&rang;(t) |
 
 ## Example 1 — 1-D reweight in Q²
 
@@ -626,6 +627,18 @@ generator's own `w_ratio` and the script's prediction agreed to every
 printed digit. If the ntuple already carries a `w_ratio ≠ 1` (a run with
 `ratio_weight:`), it is compared to the model too, which is the
 table-vs-formula closure without a second run.
+
+### Seeing what it does
+
+```bash
+python plot_ratio_weight.py gen_truth.root --out ../ratio_weight.pdf
+```
+
+Three panels in `t`: the generated `dN/dt` with and without the weight
+(shapes, unit area), their ratio — the mean `w_ratio` in each `t` bin,
+both raw and with the integral fixed — and the per-event spread of
+`log10 w_ratio` at each `t`. The ratio panel is the reweighting factor
+the p̄p / pp hypothesis applies as a function of `t`.
 
 ### Recomputing offline
 
