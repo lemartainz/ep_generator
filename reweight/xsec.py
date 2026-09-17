@@ -187,7 +187,9 @@ _SAFE_FUNCS = {
     )
 }
 _SAFE_FUNCS.update({"pi": np.pi, "e": np.e, "inf": np.inf,
-                    "min": np.minimum, "max": np.maximum})
+                    "min": np.minimum, "max": np.maximum,
+                    # so one string works both here and in ROOT's TFormula
+                    "pow": np.power})
 
 
 def eval_formula(expr, kin):

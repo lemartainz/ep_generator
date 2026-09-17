@@ -107,11 +107,15 @@ Any lines beginning with # are ignored.
 | mom_weight  | Weight surface `w(p_lead, p_sub)` applied as a second accept-reject after the event is built | string |
 | xsec_weight | 3-D weight surface `w(Q^2, W, M_X)` applied as a third accept-reject after the decay chain: `<root file> [<hist name>]` (name defaults to `w_Q2_W_M`) | string |
 | xsec_weight_mode | How to read that TH3D: `bin` (default, per-bin lookup) or `interp` (trilinear) | string |
-| truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e)` to this ROOT file | string |
+| ratio_weight | **Carried** (not accept-reject) weight `w = dσ/dt(s_p̄p, t) / dσ/dt(s_pp, t)` from a TH2D table of `dσ/dt(s, t)`: `<root file> [<hist name>]` (name defaults to `dsdt_s_t`) | string |
+| ratio_weight_mode | Whether that table holds `dσ/dt` (`linear`, default) or `ln dσ/dt` (`log`, built with `--log`; recommended) | string |
+| ratio_weight_formula | Same weight from a `TFormula` in `s` and `t` instead of a table, e.g. `exp((4.0 + 0.5*log(s))*t) * pow(s,-2)` | string |
+| ratio_weight_sidecar | Write the carried weight, one per line, parallel to the LUND file (same format as `reweight_lund.py --mode sidecar`) | string |
+| truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e, w_ratio, t, s_pbarp, s_pp)` to this ROOT file | string |
 
 All of these are built by a **separate** script and simply loaded here;
-the four weighting keys are parsed and applied by `EventWeighter.h`, not
-by the generator — see [Weighting](#weighting).
+the weighting keys are parsed and applied by `EventWeighter.h`, not by
+the generator — see [Weighting](#weighting).
 
 ## Reaction
 If you want to decay multiple particles just have to separate using :
@@ -139,12 +143,13 @@ the generator's own code either. Everything weighting-related lives in
 - `WeightConfig` — the input-card side. `ReadInput` holds one, and the
   card parser delegates any key it does not recognise to
   `WeightConfig::parseKey`, which owns `weight_func`, `mom_weight`,
-  `xsec_weight` and `xsec_weight_mode`.
+  `xsec_weight`, `xsec_weight_mode` and the `ratio_weight*` keys.
 - `EventKinematics` — what a built event looks like to the weighter:
-  `Q2`, `Ep`, `W`, `M_X` (from the truth 4-vector) and a pointer to the
-  final-state particle list.
+  `Q2`, `Ep`, `W`, `M_X`, the truth first-vertex 4-vectors
+  (`q`, `p_target`, `p_recoil`, `p_X`) and a pointer to the final-state
+  particle list.
 - `EventWeighter` — loads the ROOT histograms once and exposes two
-  accept-reject stages the generator calls:
+  accept-reject stages and one carried weight the generator calls:
 
   ```cpp
   EventWeighter weighter(input.weights);
@@ -152,6 +157,7 @@ the generator's own code either. Everything weighting-related lives in
   ...
   weighter.acceptElectron(Q2, Ep, rnd);   // inside the electron sampler
   weighter.acceptEvent(kin, rnd);         // after the full decay chain
+  double w = weighter.eventWeight(kin);   // carried weight, 1 when off
   weighter.printSummary(cout);            // rejection counts per surface
   ```
 
@@ -160,8 +166,9 @@ the generator's own code either. Everything weighting-related lives in
 
 To add a new weight surface: give `WeightConfig` a file/name pair and a
 `parseKey` branch, load it in `EventWeighter::load()`, and evaluate it in
-`acceptElectron()` (if it depends only on the scattered electron) or
-`acceptEvent()` (if it needs the decayed event). `runEventGenerator.cpp`
+`acceptElectron()` (if it depends only on the scattered electron),
+`acceptEvent()` (if it needs the decayed event) or `eventWeight()` (if
+it should be carried rather than used to reject). `runEventGenerator.cpp`
 does not change.
 
 A separate script writes a `TH2D` of accept probabilities to a ROOT file;
@@ -236,6 +243,68 @@ acceptance).
 Inspect a surface before running with
 `python reweight/plot_weight.py weight_func.root w_Q2_Ep`. Full details in
 [reweight/README_reweight.md](reweight/README_reweight.md).
+
+### Carried ratio weight (p̄p vs pp rescattering)
+
+For `e p → e' p p p̄` the generator can attach to every event
+
+```
+w_ratio = dσ/dt(s_p̄p, t) / dσ/dt(s_pp, t)
+```
+
+— **one** parametrization of the elastic `dσ/dt(s, t)` evaluated at the
+two sub-energies of the same event, at the event's own `t`. It is meant
+for comparing p̄p and pp rescattering (tying the small-|t| Ambats et al.
+and large-|t| White et al. elastic ratios together). The invariants, all
+from truth 4-vectors:
+
+- `t = (p_target − p_recoil)² = (q − p_X)²`, the first-vertex momentum
+  transfer the `t_slope` already shapes — the same `t` in numerator and
+  denominator;
+- `s_p̄p = (p_p̄ + p_recoil)²`, `s_pp = (p_fromX + p_recoil)²` with
+  `p_fromX = p_X − p_p̄` (exact by conservation, so the two protons never
+  have to be told apart).
+
+Unlike the surfaces above this weight is **carried, not accept-rejected**:
+every event is kept, nothing is normalized to max 1 (any constant in
+`dσ/dt` cancels in the ratio), and the number travels with the event as
+the truth-ntuple branch `w_ratio` and, with `ratio_weight_sidecar:`, as a
+one-per-line file parallel to the LUND. The parametrization comes in
+either of two ways:
+
+```
+# a table, built in Python (fit your data there):
+ratio_weight: dsdt_table.root log_dsdt_s_t
+ratio_weight_mode: log
+# or a formula straight in the card (x, y are aliases for s, t):
+ratio_weight_formula: exp((4.0 + 0.5*log(s))*t) * pow(s,-2)
+ratio_weight_sidecar: w_ratio.txt
+```
+
+The table is `dσ/dt` on an `(s, t)` grid, looked up by bilinear
+interpolation between bin centers. Build it with
+`reweight/build_dsdt_table.py`, which takes a formula, a Python function
+`f(s, t)` or a CSV of points, and — given the truth ntuple of a previous
+run — reports how many events the grid covers and the interpolation error
+it will incur. Prefer `--log` (the table then holds `ln dσ/dt`): an
+exponential in `t` becomes a plane, and the error at a given binning
+drops by orders of magnitude. Measured with the formula above on a
+90×20 grid: 1.9 % median error and a 7 % bias on the mean weight when
+linear, 7e-5 median when log.
+
+```bash
+# 1. any run with `truth_ntuple: gen_truth.root` (the ratio branches are always written)
+# 2. build the table on a grid that covers the reported s and t ranges
+cd reweight
+python build_dsdt_table.py --formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)" \
+    --s-range 3.4,12.4 --ns 90 --t-range=-14.2,0 --nt 200 --log \
+    --gen gen_truth.root --out ../dsdt_table.root
+# 3. add the printed ratio_weight lines and rerun
+```
+
+Offline, `w_ratio` can always be recomputed from the `t`, `s_pbarp` and
+`s_pp` branches — that is also how the table and formula paths are
+checked against each other.
 
 ## Example usage
 

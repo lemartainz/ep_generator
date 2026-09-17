@@ -211,6 +211,10 @@ struct ReadInput {
     // as the denominator, and plot_xsec_closure.py as the generated
     // distribution to compare against the cross section.
     std::string truth_ntuple_file;
+    // Optional sidecar for the carried ratio weight (ratio_weight /
+    // ratio_weight_formula in EventWeighter.h): one w_ratio per line,
+    // parallel to the LUND file, same format reweight_lund.py writes.
+    std::string ratio_sidecar_file;
 };
 
 // Two-body decay result
@@ -311,6 +315,9 @@ ReadInput readInputFile(const string &filename) {
         } else if (key == "truth_ntuple") {
             // truth_ntuple: path/to/file.root
             iss >> input.truth_ntuple_file;
+        } else if (key == "ratio_weight_sidecar") {
+            // ratio_weight_sidecar: path/to/weights.txt
+            iss >> input.ratio_sidecar_file;
         } else if (key == "data_hist") {
             // data_hist: path/to/file.root  [hist_name]
             std::string fname, hname;
@@ -919,6 +926,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     // Also store the scattered electron and W for each accepted event (for plots/debug)
     std::vector<TLorentzVector> accepted_scattered;
     std::vector<TLorentzVector> accepted_W;
+    std::vector<double>         accepted_w_ratio;   // carried weight, 1 when off
 
     // Optional truth ntuple. Opened AFTER every histogram above has been
     // constructed, so none of them end up owned by this file and deleted
@@ -926,6 +934,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     TFile *truth_tf = nullptr;
     TTree *truth_tree = nullptr;
     double nt_Q2 = 0, nt_W = 0, nt_M = 0, nt_Ep = 0, nt_theta = 0;
+    double nt_w_ratio = 1, nt_t = 0, nt_s_pbarp = 0, nt_s_pp = 0;
     if (!input.truth_ntuple_file.empty()) {
         truth_tf = TFile::Open(input.truth_ntuple_file.c_str(), "RECREATE");
         if (!truth_tf || truth_tf->IsZombie()) {
@@ -940,8 +949,15 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             truth_tree->Branch("M",       &nt_M,     "M/D");
             truth_tree->Branch("Ep",      &nt_Ep,    "Ep/D");
             truth_tree->Branch("theta_e", &nt_theta, "theta_e/D");
+            // Carried ratio weight and the invariants it was evaluated at
+            // (w_ratio == 1 when no ratio weight is configured), so the
+            // weight can be recomputed or a table's grid chosen offline.
+            truth_tree->Branch("w_ratio", &nt_w_ratio, "w_ratio/D");
+            truth_tree->Branch("t",       &nt_t,       "t/D");
+            truth_tree->Branch("s_pbarp", &nt_s_pbarp, "s_pbarp/D");
+            truth_tree->Branch("s_pp",    &nt_s_pp,    "s_pp/D");
             cout << "Truth ntuple enabled: " << input.truth_ntuple_file
-                 << ":truth  (Q2, W, M, Ep, theta_e)" << endl;
+                 << ":truth  (Q2, W, M, Ep, theta_e, w_ratio, t, s_pbarp, s_pp)" << endl;
         }
     }
 
@@ -1031,22 +1047,37 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         kin.W   = v_W.M();
         kin.M_X = p2_lab.M();
         kin.final_particles = &final_particles;
+        kin.q        = v_virtual;
+        kin.p_target = p_target;
+        kin.p_recoil = p1_lab;
+        kin.p_X      = p2_lab;
+        kin.have_vertex = true;
         if (!weighter.acceptEvent(kin, gen.rnd)) continue;
+
+        // Carried weight (ratio_weight): the event is kept whatever the
+        // value; it rides along in the truth ntuple and the sidecar.
+        EventWeighter::RatioVars rv;
+        const double w_ratio = weighter.eventWeight(kin, &rv);
 
         // Truth row for the ACCEPTED event: the generator's own density in
         // the weighting variables, after every accept-reject stage.
         if (truth_tree) {
-            nt_Q2    = kin.Q2;
-            nt_W     = kin.W;
-            nt_M     = kin.M_X;
-            nt_Ep    = kin.Ep;
-            nt_theta = v_scattered.Theta() * TMath::RadToDeg();
+            nt_Q2      = kin.Q2;
+            nt_W       = kin.W;
+            nt_M       = kin.M_X;
+            nt_Ep      = kin.Ep;
+            nt_theta   = v_scattered.Theta() * TMath::RadToDeg();
+            nt_w_ratio = w_ratio;
+            nt_t       = rv.t;
+            nt_s_pbarp = rv.s_pbarp;
+            nt_s_pp    = rv.s_pp;
             truth_tree->Fill();
         }
 
         all_final_particles.push_back(final_particles);
         accepted_scattered.push_back(v_scattered);
         accepted_W.push_back(v_W);
+        accepted_w_ratio.push_back(w_ratio);
 
         // Fill weighted-variable histograms: t, Q2, E'
         // t = (gamma* - meson)^2;  same convention as twoBodyDecayWeighted
@@ -1177,6 +1208,24 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     if (input.write_lund) {
         cout << "Creating LUND file..." << endl;
         ofstream fout(lund_filename);
+        // Sidecar for the carried ratio weight: written from the SAME loop
+        // as the LUND file, after the same skip, so line i is event i.
+        ofstream wout;
+        if (!input.ratio_sidecar_file.empty()) {
+            if (accepted_w_ratio.size() != all_final_particles.size()) {
+                cerr << "ERROR: weight/event count mismatch ("
+                     << accepted_w_ratio.size() << " vs "
+                     << all_final_particles.size() << "); sidecar not written." << endl;
+            } else {
+                wout.open(input.ratio_sidecar_file);
+                if (!wout.is_open()) {
+                    cerr << "ERROR: cannot open " << input.ratio_sidecar_file
+                         << " for writing." << endl;
+                } else {
+                    wout << std::fixed << std::setprecision(6);
+                }
+            }
+        }
         if (!fout.is_open()) {
             cerr << "ERROR: cannot open " << lund_filename << " for writing." << endl;
         } else {
@@ -1193,6 +1242,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
                 }
                 if (!event_ok) continue;
                 ++nWritten;
+                if (wout.is_open()) wout << accepted_w_ratio[i] << "\n";
 
                 int num_particles = (int)all_final_particles[i].size();
                 fout << "\t" << num_particles
@@ -1215,6 +1265,11 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             }
             fout.close();
             cout << "Written " << nWritten << " events to " << lund_filename << endl;
+            if (wout.is_open()) {
+                wout.close();
+                cout << "Written " << nWritten << " ratio weights to "
+                     << input.ratio_sidecar_file << endl;
+            }
             if (nWritten != nEvents) {
                 cout << "WARNING: " << (nEvents - nWritten)
                      << " events dropped at LUND writing stage (should not happen)." << endl;
@@ -1222,6 +1277,10 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         }
     } else {
         cout << "Skipping LUND file creation." << endl;
+        if (!input.ratio_sidecar_file.empty()) {
+            cout << "  (ratio_weight_sidecar skipped with it; w_ratio is in the "
+                    "truth ntuple)" << endl;
+        }
     }
 
     // -----------------------------------------------------

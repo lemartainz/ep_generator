@@ -33,6 +33,7 @@ directory so the `lund_io` / `kinematics` imports resolve.
 | `import_xsec.py` | Your real &sigma;(Q&sup2;, W, M) (TH3 / CSV) &rarr; the npz the builder reads |
 | `build_xsec_weight3d.py` | 3-D &sigma;(Q&sup2;, W, M) &rarr; `xsec_weight.root` (TH3D) for the generator |
 | `plot_xsec_closure.py` | Generated vs cross section with ratio panels &rarr; closure PDF |
+| `build_dsdt_table.py` | d&sigma;/dt(s, t) &rarr; `dsdt_table.root` (TH2D) for the generator's carried ratio weight |
 
 ## Example 1 — 1-D reweight in Q²
 
@@ -539,6 +540,100 @@ Same output, same generator plumbing, different numerator:
 
 Use the cross-section builder to start from a physics model; use the
 data-driven builder to correct toward measured data.
+
+## Carried ratio weight: d&sigma;/dt(s, t) (`build_dsdt_table.py`)
+
+A different kind of weight from everything above: it is **carried**, not
+used to accept or reject. For `e p → e' p p p̄` the generator attaches
+to every event
+
+```
+w_ratio = dσ/dt(s_pbarp, t) / dσ/dt(s_pp, t)
+```
+
+with ONE parametrization of the elastic dσ/dt evaluated at the p̄p and
+the pp sub-energies of the same event (`s_pbarp = (p_pbar + p_recoil)²`,
+`s_pp = (p_fromX + p_recoil)²`, `p_fromX = p_X − p_pbar`) at the event's
+first-vertex `t = (p_target − p_recoil)²`. The weight is written as the
+truth-ntuple branch `w_ratio`, together with `t`, `s_pbarp`, `s_pp`, and
+optionally to a sidecar file — one `%.6f` per line, parallel to the LUND,
+the same format Example 4 produces — via `ratio_weight_sidecar:`.
+
+Nothing is normalized: any overall constant in dσ/dt cancels in the
+ratio, so units do not matter and there is no max-1 rescaling.
+
+### Handing over dσ/dt
+
+Two ways, and they are checked against each other below:
+
+```
+ratio_weight_formula: exp((4.0 + 0.5*log(s))*t) * pow(s,-2)   # TFormula in s, t
+```
+```
+ratio_weight: dsdt_table.root log_dsdt_s_t                    # TH2D from this script
+ratio_weight_mode: log
+```
+
+The formula is evaluated by ROOT's `TFormula` per event; write it with
+`log` (natural) and `pow` so the identical string also works as
+`--formula` here. The table is the general path — fit the Ambats/White
+data in Python, or hand over a function or a CSV of points:
+
+```bash
+python build_dsdt_table.py --formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)" \
+    --s-range 3.4,12.4 --ns 90 --t-range=-14.2,0 --nt 200 --log \
+    --gen gen_truth.root --out ../dsdt_table.root
+python build_dsdt_table.py --xsec-py model.py:dsdt ...        # f(s, t) -> array
+python build_dsdt_table.py --table dsdt.csv --cols s,t,dsdt ...   # scattered points
+```
+
+`--t-range` needs the `=` form: a value starting with `-` is otherwise
+read as a flag.
+
+### Bin centers, not bin integrals
+
+The accept-reject builders above produce a per-bin ratio, so their
+numerator has to be the cross section **integrated** over the bin. This
+table is different: the generator reads it with `TH2::Interpolate`,
+bilinearly between bin **centers**, as a continuous function. So the
+function is evaluated *at* the centers, there is no `--supersample`, and
+the question is only whether a bilinear patch follows dσ/dt between
+neighbouring centers.
+
+For an exponential in `t` it does not, unless the grid is fine. Hence
+`--log`: the table then holds `ln dσ/dt`, the generator interpolates that
+and exponentiates (`ratio_weight_mode: log`), and an exponential becomes
+a plane. Measured with the formula above on 50 000 events:
+
+| grid (s × t) | linear: median / max `|w_table/w_exact − 1|` | log: median / max |
+|---|---|---|
+| 90 × 200 | 3.5e-4 / 3.0e-3 | 6.7e-5 / 5e-4 |
+| 90 × 20  | 1.9e-2 / 2.8e-1, mean w biased −7 % | 6.7e-5 / 9e-2 (edge clamp) |
+
+Use `--log` unless dσ/dt crosses zero.
+
+### `--gen`: coverage and error before you run
+
+Give `--gen` the truth ntuple of any previous run (the `t`, `s_pbarp`,
+`s_pp` branches are always written, weight or no weight). The script
+prints the percentiles of the three variables, the fraction of events
+whose **both** `s` values and `t` fall inside the grid — the generator
+gives `w_ratio = 0` to the rest, and counts them under
+"outside dsigma/dt table" — and, with a model on the command line, the
+exact interpolation error the table will incur on those events. That
+number is what the generator will reproduce: in the test above the
+generator's own `w_ratio` and the script's prediction agreed to every
+printed digit. If the ntuple already carries a `w_ratio ≠ 1` (a run with
+`ratio_weight:`), it is compared to the model too, which is the
+table-vs-formula closure without a second run.
+
+### Recomputing offline
+
+`w_ratio` is a deterministic function of the three truth branches, so it
+can always be rebuilt in numpy (`f(s_pbarp, t) / f(s_pp, t)`) — the
+formula path reproduces that to machine precision, the table path to the
+interpolation error above. The sidecar is the same numbers, in LUND
+order, for use downstream of GEMC.
 
 ## Notes
 

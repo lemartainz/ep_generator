@@ -40,7 +40,21 @@ mass_9999: BW 2. 0.4
 # xsec_weight: xsec_weight.root w_Q2_W_M
 # xsec_weight_mode: bin
 
-# Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e). Needed to measure
-# the proposal density for build_xsec_weight3d.py (the 3-D proposal is not
-# flat), and read by reweight/plot_xsec_closure.py for the closure plots.
+# Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e, w_ratio, t,
+# s_pbarp, s_pp). Needed to measure the proposal density for
+# build_xsec_weight3d.py (the 3-D proposal is not flat), read by
+# reweight/plot_xsec_closure.py for the closure plots, and by
+# build_dsdt_table.py --gen to choose the (s, t) grid.
 # truth_ntuple: gen_truth.root
+
+# Carried ratio weight w_ratio = dsigma/dt(s_pbarp, t) / dsigma/dt(s_pp, t)
+# for the pbar-p vs p-p rescattering comparison. NOT an accept-reject:
+# every event is kept and the weight rides along (truth branch w_ratio,
+# optional sidecar file parallel to the LUND). One parametrization of
+# dsigma/dt(s, t), given either as a TH2D table from
+# reweight/build_dsdt_table.py (prefer --log + ratio_weight_mode: log) or
+# as a TFormula in s and t. Give one or the other, not both.
+# ratio_weight: dsdt_table.root log_dsdt_s_t
+# ratio_weight_mode: log
+# ratio_weight_formula: exp((4.0 + 0.5*log(s))*t) * pow(s,-2)
+# ratio_weight_sidecar: w_ratio.txt
