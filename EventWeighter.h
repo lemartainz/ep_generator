@@ -24,14 +24,18 @@
 //
 //   weighter.eventWeight(kin)              -- once the decay chain exists
 //
-//   ratio_weight:          <root file> [<hist>]  TH2D dsigma/dt(s, t)  default dsdt_s_t
-//   ratio_weight_mode:     linear | log          table holds dsigma/dt or ln(dsigma/dt)
-//   ratio_weight_formula:  <expression in s, t>  TFormula instead of a table
+//   ratio_weight:              <root file> [<hist>]  TH2D dsigma/dt(s, t)  default dsdt_s_t
+//   ratio_weight_mode:         linear | log          table holds dsigma/dt or ln(dsigma/dt)
+//   ratio_weight_formula:      <expression in s, t>  TFormula instead of a table
+//   ratio_weight_den:          <root file> [<hist>]  separate denominator table (optional)
+//   ratio_weight_formula_den:  <expression in s, t>  separate denominator formula (optional)
 //
-//   w_ratio = dsigma/dt(s_pbarp, t) / dsigma/dt(s_pp, t)
+//   w_ratio = dsigma/dt_num(s_pbarp, t) / dsigma/dt_den(s_pp, t)
 //
-// with ONE parametrization evaluated at two sub-energies, for the pbar-p
-// vs p-p rescattering comparison in e p -> e' p p pbar (see ratioVars()).
+// for the pbar-p vs p-p rescattering comparison in e p -> e' p p pbar
+// (see ratioVars()). Without a _den key the SAME parametrization is used
+// in both places, evaluated at the two sub-energies; with one, the
+// numerator is the pbar-p model and the denominator the p-p model.
 //
 // To add a new weight: give WeightConfig a file/name pair and a parseKey
 // branch, load it in EventWeighter::load(), and evaluate it in
@@ -114,6 +118,10 @@ struct WeightConfig {
     // t than interpolating dsigma/dt itself.
     bool ratio_weight_log = false;
     std::string ratio_formula;
+    // Optional separate denominator (p-p model). Empty: same as numerator.
+    std::string ratio_weight_den_file;
+    std::string ratio_weight_den_name = "dsdt_s_t";
+    std::string ratio_formula_den;
 
     // Consume one `key: value(s)` line of the input card (key already
     // stripped of its trailing colon). Returns true if the key belongs to
@@ -143,16 +151,11 @@ struct WeightConfig {
                           << "'; using linear." << std::endl;
             }
         } else if (key == "ratio_weight_formula") {
-            // The expression contains spaces: take the rest of the line
-            // (as readInputFile does for `reaction`), minus a trailing
-            // `# comment` and surrounding whitespace.
-            std::string rest;
-            std::getline(iss, rest);
-            size_t hash = rest.find('#');
-            if (hash != std::string::npos) rest.erase(hash);
-            size_t a = rest.find_first_not_of(" \t");
-            size_t b = rest.find_last_not_of(" \t\r");
-            ratio_formula = (a == std::string::npos) ? "" : rest.substr(a, b - a + 1);
+            ratio_formula = restOfLine(iss);
+        } else if (key == "ratio_weight_den") {
+            readFileAndName(iss, ratio_weight_den_file, ratio_weight_den_name);
+        } else if (key == "ratio_weight_formula_den") {
+            ratio_formula_den = restOfLine(iss);
         } else {
             return false;
         }
@@ -160,6 +163,18 @@ struct WeightConfig {
     }
 
 private:
+    // An expression contains spaces: take the rest of the line (as
+    // readInputFile does for `reaction`), minus a trailing `# comment`
+    // and surrounding whitespace.
+    static std::string restOfLine(std::istringstream &iss) {
+        std::string rest;
+        std::getline(iss, rest);
+        size_t hash = rest.find('#');
+        if (hash != std::string::npos) rest.erase(hash);
+        size_t a = rest.find_first_not_of(" \t");
+        size_t b = rest.find_last_not_of(" \t\r");
+        return (a == std::string::npos) ? "" : rest.substr(a, b - a + 1);
+    }
     // `<key>: path/to/file.root  [hist_name]` -- the name keeps its
     // default when omitted.
     static void readFileAndName(std::istringstream &iss,
@@ -251,7 +266,35 @@ public:
                           << ")" << std::endl;
             }
         } else if (!cfg_.ratio_formula.empty()) {
-            loadFormula(cfg_.ratio_formula);
+            if (formula_.load(cfg_.ratio_formula, "ratio_weight_formula")) {
+                std::cout << "Ratio weight enabled (carried as w_ratio): formula '"
+                          << cfg_.ratio_formula << "'  (TFormula in s, t)" << std::endl;
+            }
+        }
+        if (hasRatioStage()) {
+            if (!cfg_.ratio_weight_den_file.empty() && !cfg_.ratio_formula_den.empty()) {
+                std::cerr << "ERROR: give ratio_weight_den OR ratio_weight_formula_den, "
+                             "not both; using the numerator model for both." << std::endl;
+            } else if (!cfg_.ratio_weight_den_file.empty()) {
+                if (ratio_den_.open(cfg_.ratio_weight_den_file, cfg_.ratio_weight_den_name,
+                                    "ratio_weight_den")) {
+                    std::cout << "  denominator (p-p) model: "
+                              << cfg_.ratio_weight_den_file << ":"
+                              << cfg_.ratio_weight_den_name << std::endl;
+                }
+            } else if (!cfg_.ratio_formula_den.empty()) {
+                if (formula_den_.load(cfg_.ratio_formula_den, "ratio_weight_formula_den")) {
+                    std::cout << "  denominator (p-p) model: formula '"
+                              << cfg_.ratio_formula_den << "'" << std::endl;
+                }
+            } else {
+                std::cout << "  denominator (p-p) model: same as numerator, at s_pp"
+                          << std::endl;
+            }
+        } else if (!cfg_.ratio_weight_den_file.empty() || !cfg_.ratio_formula_den.empty()) {
+            std::cerr << "WARNING: ratio_weight_den / ratio_weight_formula_den given "
+                         "without a numerator (ratio_weight / ratio_weight_formula); "
+                         "ignored." << std::endl;
         }
 
         if (saved) saved->cd(); else gROOT->cd();
@@ -262,7 +305,9 @@ public:
         pp_.close();
         xsec_.close();
         ratio_.close();
+        ratio_den_.close();
         formula_.reset();
+        formula_den_.reset();
     }
 
     bool hasElectronStage() const { return q2ep_.hist != nullptr; }
@@ -322,7 +367,7 @@ public:
         return true;
     }
 
-    bool hasRatioStage() const { return ratio_.hist != nullptr || formula_ != nullptr; }
+    bool hasRatioStage() const { return ratio_.hist != nullptr || formula_.ok(); }
 
     double eventWeight(const EventKinematics &kin, RatioVars *out = nullptr) const {
         RatioVars rv;
@@ -332,20 +377,16 @@ public:
         ++n_ratio_eval_;
         if (!ok) { ++n_ratio_topology_; return 0.0; }
 
+        // Numerator: the pbar-p model at s_pbarp. Denominator: the p-p
+        // model at s_pp -- a separate table/formula if one was given,
+        // otherwise the same one.
+        const bool own_den = ratio_den_.hist != nullptr || formula_den_.ok();
         double num, den;
-        if (ratio_.hist) {
-            // Outside the table's range dsigma/dt says nothing. Inside it,
-            // clamp into the bin-center hull: the table is a smooth
-            // function, not a per-bin ratio, so the half-bin band at the
-            // edge must not be zeroed the way the accept-reject surfaces do.
-            if (!ratio_.covers(rv.s_pbarp, rv.t) ||
-                !ratio_.covers(rv.s_pp,    rv.t)) { ++n_ratio_out_; return 0.0; }
-            num = ratio_.interpolateClamped(rv.s_pbarp, rv.t);
-            den = ratio_.interpolateClamped(rv.s_pp,    rv.t);
-            if (cfg_.ratio_weight_log) { num = std::exp(num); den = std::exp(den); }
+        if (!dsdt(ratio_, formula_, rv.s_pbarp, rv.t, num)) return 0.0;
+        if (own_den) {
+            if (!dsdt(ratio_den_, formula_den_, rv.s_pp, rv.t, den)) return 0.0;
         } else {
-            num = evalFormula(rv.s_pbarp, rv.t);
-            den = evalFormula(rv.s_pp,    rv.t);
+            if (!dsdt(ratio_, formula_, rv.s_pp, rv.t, den)) return 0.0;
         }
         if (!std::isfinite(num) || !std::isfinite(den) || den <= 0.0 || num < 0.0) {
             ++n_ratio_bad_; return 0.0;
@@ -514,44 +555,77 @@ private:
     // and silently evaluate garbage. Evaluate through EvalPar() with a
     // buffer filled by variable index instead. Slots 0 and 1 are filled
     // too, so `x` and `y` work as aliases for s and t.
-    static constexpr int kFormulaMaxDim = 8;
+    struct Formula {
+        static constexpr int kMaxDim = 8;
+        std::unique_ptr<TFormula> f;
+        int is = 4, it = 3;
 
-    void loadFormula(const std::string &expr) {
-        auto f = std::make_unique<TFormula>("ratio_dsdt", "", /*addToGlobList=*/false);
-        f->AddVariable("s");
-        f->AddVariable("t");
-        if (f->Compile(expr.c_str()) != 0 || !f->IsValid()) {
-            std::cerr << "ERROR: ratio_weight_formula '" << expr
-                      << "' does not compile; ratio weight disabled." << std::endl;
-            return;
-        }
-        if (f->GetNdim() > kFormulaMaxDim) {
-            std::cerr << "ERROR: ratio_weight_formula has " << f->GetNdim()
-                      << " variables (max " << kFormulaMaxDim
-                      << "); ratio weight disabled." << std::endl;
-            return;
-        }
-        f_is_ = f->GetVarNumber("s");
-        f_it_ = f->GetVarNumber("t");
-        formula_ = std::move(f);
-        std::cout << "Ratio weight enabled (carried as w_ratio): formula '"
-                  << expr << "'  (TFormula in s, t)" << std::endl;
-    }
+        bool ok() const { return f != nullptr; }
+        void reset() { f.reset(); }
 
-    double evalFormula(double s, double t) const {
-        std::array<double, kFormulaMaxDim> x{};
-        x[0] = s; x[1] = t;          // x, y aliases
-        x[f_is_] = s; x[f_it_] = t;  // named s, t
-        return formula_->EvalPar(x.data());
+        bool load(const std::string &expr, const char *label) {
+            auto g = std::make_unique<TFormula>(label, "", /*addToGlobList=*/false);
+            g->AddVariable("s");
+            g->AddVariable("t");
+            if (g->Compile(expr.c_str()) != 0 || !g->IsValid()) {
+                std::cerr << "ERROR: " << label << " '" << expr
+                          << "' does not compile; disabled." << std::endl;
+                return false;
+            }
+            if (g->GetNdim() > kMaxDim) {
+                std::cerr << "ERROR: " << label << " has " << g->GetNdim()
+                          << " variables (max " << kMaxDim << "); disabled." << std::endl;
+                return false;
+            }
+            // Compile() drops variables the expression does not use (a
+            // constant like "2" keeps none), and GetVarNumber() on a
+            // dropped name errors out loud -- so find the slots by name
+            // and leave -1 for the ones that are not there.
+            is = it = -1;
+            for (int i = 0; i < g->GetNdim(); ++i) {
+                const TString name = g->GetVarName(i);
+                if (name == "s") is = i;
+                if (name == "t") it = i;
+            }
+            f = std::move(g);
+            return true;
+        }
+
+        double eval(double s, double t) const {
+            std::array<double, kMaxDim> x{};
+            x[0] = s; x[1] = t;                // x, y aliases
+            if (is >= 0) x[is] = s;            // named s, t
+            if (it >= 0) x[it] = t;
+            return f->EvalPar(x.data());
+        }
+    };
+
+    // One dsigma/dt model (table or formula) at (s, t). False, with the
+    // out-of-table counter bumped, when the point is outside the table.
+    bool dsdt(const Surface2D &tab, const Formula &fml,
+              double s, double t, double &val) const {
+        if (tab.hist) {
+            // Outside the table's range dsigma/dt says nothing. Inside it,
+            // clamp into the bin-center hull: the table is a smooth
+            // function, not a per-bin ratio, so the half-bin band at the
+            // edge must not be zeroed the way the accept-reject surfaces do.
+            if (!tab.covers(s, t)) { ++n_ratio_out_; return false; }
+            val = tab.interpolateClamped(s, t);
+            if (cfg_.ratio_weight_log) val = std::exp(val);
+            return true;
+        }
+        val = fml.eval(s, t);
+        return true;
     }
 
     WeightConfig cfg_;
-    Surface2D q2ep_;   // weight_func
-    Surface2D pp_;     // mom_weight
-    Surface3D xsec_;   // xsec_weight
-    Surface2D ratio_;  // ratio_weight (table)
-    std::unique_ptr<TFormula> formula_;   // ratio_weight_formula
-    int f_is_ = 4, f_it_ = 3;
+    Surface2D q2ep_;       // weight_func
+    Surface2D pp_;         // mom_weight
+    Surface3D xsec_;       // xsec_weight
+    Surface2D ratio_;      // ratio_weight (numerator table)
+    Formula   formula_;    // ratio_weight_formula
+    Surface2D ratio_den_;  // ratio_weight_den (optional denominator table)
+    Formula   formula_den_;// ratio_weight_formula_den
 
     long long n_reject_electron_ = 0;
     long long n_reject_mom_      = 0;

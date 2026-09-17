@@ -552,10 +552,12 @@ to every event
 w_ratio = dσ/dt(s_pbarp, t) / dσ/dt(s_pp, t)
 ```
 
-with ONE parametrization of the elastic dσ/dt evaluated at the p̄p and
+with one parametrization of the elastic dσ/dt evaluated at the p̄p and
 the pp sub-energies of the same event (`s_pbarp = (p_pbar + p_recoil)²`,
 `s_pp = (p_fromX + p_recoil)²`, `p_fromX = p_X − p_pbar`) at the event's
-first-vertex `t = (p_target − p_recoil)²`. The weight is written as the
+first-vertex `t = (p_target − p_recoil)²` — or, with a `_den` key, a
+p̄p model in the numerator and a separate pp model in the denominator.
+The weight is written as the
 truth-ntuple branch `w_ratio`, together with `t`, `s_pbarp`, `s_pp`, and
 optionally to a sidecar file — one `%.6f` per line, parallel to the LUND,
 the same format Example 4 produces — via `ratio_weight_sidecar:`.
@@ -574,6 +576,12 @@ ratio_weight_formula: exp((4.0 + 0.5*log(s))*t) * pow(s,-2)   # TFormula in s, t
 ratio_weight: dsdt_table.root log_dsdt_s_t                    # TH2D from this script
 ratio_weight_mode: log
 ```
+
+Either can be paired with a separate denominator model,
+`ratio_weight_formula_den:` or `ratio_weight_den: <file> [<hist>]`
+(a `--log` table in the denominator needs the numerator to be `--log`
+too: `ratio_weight_mode` applies to both). Without one, the same model is
+evaluated at `s_pp`.
 
 The formula is evaluated by ROOT's `TFormula` per event; write it with
 `log` (natural) and `pow` so the identical string also works as
@@ -631,14 +639,27 @@ table-vs-formula closure without a second run.
 ### Seeing what it does
 
 ```bash
-python plot_ratio_weight.py gen_truth.root --out ../ratio_weight.pdf
+python plot_ratio_weight.py gen_truth.root --out ../ratio_weight.pdf \
+    --formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)"     # optional overlay
 ```
 
 Three panels in `t`: the generated `dN/dt` with and without the weight
 (shapes, unit area), their ratio — the mean `w_ratio` in each `t` bin,
 both raw and with the integral fixed — and the per-event spread of
 `log10 w_ratio` at each `t`. The ratio panel is the reweighting factor
-the p̄p / pp hypothesis applies as a function of `t`.
+the p̄p / pp hypothesis applies as a function of `t`. With `--formula`
+(and `--formula-den`) the **input** ratio is evaluated from the same
+truth branches and averaged in the same bins, so input and extracted sit
+on the same axes. Smallest closure:
+
+```
+ratio_weight_formula: 2
+ratio_weight_formula_den: 1
+```
+
+gives `w_ratio = 2` for every event and `python plot_ratio_weight.py
+truth.root --formula 2 --formula-den 1` shows extracted on input at 2 in
+every `t` bin.
 
 ### Recomputing offline
 

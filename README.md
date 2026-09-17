@@ -110,6 +110,7 @@ Any lines beginning with # are ignored.
 | ratio_weight | **Carried** (not accept-reject) weight `w = dσ/dt(s_p̄p, t) / dσ/dt(s_pp, t)` from a TH2D table of `dσ/dt(s, t)`: `<root file> [<hist name>]` (name defaults to `dsdt_s_t`) | string |
 | ratio_weight_mode | Whether that table holds `dσ/dt` (`linear`, default) or `ln dσ/dt` (`log`, built with `--log`; recommended) | string |
 | ratio_weight_formula | Same weight from a `TFormula` in `s` and `t` instead of a table, e.g. `exp((4.0 + 0.5*log(s))*t) * pow(s,-2)` | string |
+| ratio_weight_den, ratio_weight_formula_den | Optional separate **denominator** (p-p) model, table or formula; without one the numerator model is used at both sub-energies | string |
 | ratio_weight_sidecar | Write the carried weight, one per line, parallel to the LUND file (same format as `reweight_lund.py --mode sidecar`) | string |
 | truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e, w_ratio, t, s_pbarp, s_pp)` to this ROOT file | string |
 
@@ -252,8 +253,10 @@ For `e p → e' p p p̄` the generator can attach to every event
 w_ratio = dσ/dt(s_p̄p, t) / dσ/dt(s_pp, t)
 ```
 
-— **one** parametrization of the elastic `dσ/dt(s, t)` evaluated at the
-two sub-energies of the same event, at the event's own `t`. It is meant
+— by default **one** parametrization of the elastic `dσ/dt(s, t)`
+evaluated at the two sub-energies of the same event, at the event's own
+`t`; with `ratio_weight_den:` / `ratio_weight_formula_den:` a separate
+p-p model in the denominator. It is meant
 for comparing p̄p and pp rescattering (tying the small-|t| Ambats et al.
 and large-|t| White et al. elastic ratios together). The invariants, all
 from truth 4-vectors:
@@ -306,7 +309,10 @@ Offline, `w_ratio` can always be recomputed from the `t`, `s_pbarp` and
 `s_pp` branches — that is also how the table and formula paths are
 checked against each other.
 `reweight/plot_ratio_weight.py gen_truth.root` draws the `t` spectrum
-with and without the weight and their ratio, `⟨w_ratio⟩(t)`.
+with and without the weight and their ratio, `⟨w_ratio⟩(t)`; give it the
+same `--formula` (and `--formula-den`) to overlay the input ratio. The
+simplest closure — `ratio_weight_formula: 2`, `ratio_weight_formula_den: 1`
+— reproduces a flat 2 in every `t` bin.
 
 ## Example usage
 

@@ -8,7 +8,12 @@ Reads the truth ntuple of a run with `ratio_weight:` / `ratio_weight_formula:`
             unit area, so the panel compares SHAPES)
     middle  their ratio -- the mean w_ratio per t bin, i.e. the reweighting
             factor the pbar-p / p-p hypothesis applies at each t. The raw
-            (not shape-normalized) mean is drawn too.
+            (not shape-normalized) mean is drawn too. With --formula (and
+            optionally --formula-den) the INPUT ratio is overlaid: the
+            same numpy expression(s) in s, t the generator was given,
+            evaluated per event from the s_pbarp, s_pp, t branches and
+            averaged in the same t bins -- so "input" and "extracted"
+            are directly comparable.
     bottom  the spread of w_ratio at each t, as a 2-D histogram in log10 w
 
 
@@ -16,6 +21,7 @@ Usage
 -----
     python plot_ratio_weight.py gen_truth.root [--out ../ratio_weight.pdf]
         [--tree truth] [--nbins 60] [--t-range=-14,0]
+        [--formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)" [--formula-den "..."]]
 """
 
 import argparse
@@ -23,10 +29,24 @@ import os
 import sys
 
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import xsec                                                      # noqa: E402
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt                                  # noqa: E402
 from matplotlib.gridspec import GridSpec                         # noqa: E402
+
+
+def eval_st(expr, S, T):
+    """numpy expression in s, t (same whitelist as build_dsdt_table.py)."""
+    ns = dict(xsec._SAFE_FUNCS)
+    ns.update({"s": S, "t": T, "x": S, "y": T, "M_P": xsec.M_P})
+    try:
+        val = eval(expr, {"__builtins__": {}}, ns)                # noqa: S307
+    except Exception as err:
+        raise SystemExit(f"--formula failed: {err}")
+    return np.broadcast_to(np.asarray(val, float), S.shape).astype(float)
 
 
 def main():
@@ -38,19 +58,35 @@ def main():
     ap.add_argument("--nbins", type=int, default=60)
     ap.add_argument("--t-range", default=None,
                     help='"lo,hi" (write --t-range=-14,0); default: data range')
+    ap.add_argument("--formula", default=None,
+                    help="the input dsigma/dt(s, t) (numerator), to overlay "
+                         "the input ratio")
+    ap.add_argument("--formula-den", default=None,
+                    help="separate denominator model (default: --formula at s_pp)")
     args = ap.parse_args()
 
     import uproot
     if not os.path.exists(args.gen):
         raise SystemExit(f"file not found: {args.gen}")
     tr = uproot.open(args.gen)[args.tree]
-    need = ["w_ratio", "t"]
+    need = ["w_ratio", "t", "s_pbarp", "s_pp"]
     missing = [b for b in need if b not in tr.keys()]
     if missing:
         raise SystemExit(f"{args.gen}:{args.tree} lacks {missing}")
     a = tr.arrays(need, library="np")
     ok = np.isfinite(a["t"]) & np.isfinite(a["w_ratio"])
     t, w = a["t"][ok], a["w_ratio"][ok]
+
+    w_in = None
+    if args.formula:
+        num = eval_st(args.formula, a["s_pbarp"][ok], t)
+        den = eval_st(args.formula_den or args.formula, a["s_pp"][ok], t)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w_in = np.where(den > 0, num / den, 0.0)
+        good = (w > 0) & (w_in > 0)
+        rel = np.abs(w[good] / w_in[good] - 1.0)
+        print(f"[input] per-event |w_gen/w_input - 1|: median {np.median(rel):.2e} "
+              f"max {rel.max():.2e}  (generator {'formula' if rel.max() < 1e-9 else 'table'} path)")
     if np.all(w == 1.0):
         print("[warn] w_ratio == 1 for every event: this run carried no ratio "
               "weight. The plot will show a flat ratio.")
@@ -67,6 +103,10 @@ def main():
     n_w, _ = np.histogram(t, bins=edges, weights=w)
     n_w2, _ = np.histogram(t, bins=edges, weights=w * w)
     n_u = n_u.astype(float)
+    if w_in is not None:
+        n_in, _ = np.histogram(t, bins=edges, weights=w_in)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean_in = np.where(n_u > 0, n_in / n_u, np.nan)
 
     # mean weight per bin = weighted / unweighted, with its statistical error
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -97,8 +137,11 @@ def main():
                   fontsize=11)
     plt.setp(ax0.get_xticklabels(), visible=False)
 
+    if w_in is not None:
+        ax1.step(edges, np.r_[mean_in, mean_in[-1]], where="post", color="k",
+                 lw=1.8, label="input ratio (from --formula, same t bins)")
     ax1.errorbar(c, mean_w, yerr=err_w, fmt="o", ms=3, color="C3",
-                 label=r"weighted / unweighted  $= \langle w_{ratio}\rangle(t)$")
+                 label=r"extracted: weighted / unweighted  $= \langle w_{ratio}\rangle(t)$")
     ax1.plot(c, shape_ratio, "-", color="C0", lw=1.2,
              label="same, shape-normalized (integral fixed)")
     ax1.axhline(1.0, color="0.5", lw=0.8)
