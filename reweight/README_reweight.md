@@ -33,8 +33,9 @@ directory so the `lund_io` / `kinematics` imports resolve.
 | `import_xsec.py` | Your real &sigma;(Q&sup2;, W, M) (TH3 / CSV) &rarr; the npz the builder reads |
 | `build_xsec_weight3d.py` | 3-D &sigma;(Q&sup2;, W, M) &rarr; `xsec_weight.root` (TH3D) for the generator |
 | `plot_xsec_closure.py` | Generated vs cross section with ratio panels &rarr; closure PDF |
-| `build_dsdt_table.py` | d&sigma;/dt(s, t) &rarr; `dsdt_table.root` (TH2D) for the generator's carried ratio weight |
-| `plot_ratio_weight.py` | t distribution with / without the carried ratio weight, and &lang;w_ratio&rang;(t) |
+| `build_dsdt_table.py` | d&sigma;/dt(s, t) model &rarr; TH2D, or `--from-gen`: the generated (s, t) density D_gen, for the rescattering weights |
+| `extract_dsdt_ratio.py` | The extraction: d&sigma;/dt&#124;s_rp&#772; (w_pbarp) over d&sigma;/dt&#124;s_rp (w_pp), input ratio overlaid |
+| `plot_ratio_weight.py` | Per-event w_pbarp / w_pp against t |
 
 ## Example 1 — 1-D reweight in Q²
 
@@ -542,56 +543,108 @@ Same output, same generator plumbing, different numerator:
 Use the cross-section builder to start from a physics model; use the
 data-driven builder to correct toward measured data.
 
-## Carried ratio weight: d&sigma;/dt(s, t) (`build_dsdt_table.py`)
+## Rescattering weights: p̄p vs pp (`build_dsdt_table.py`, `extract_dsdt_ratio.py`)
 
-A different kind of weight from everything above: it is **carried**, not
-used to accept or reject. For `e p → e' p p p̄` the generator attaches
-to every event
-
-```
-w_ratio = dσ/dt(s_pbarp, t) / dσ/dt(s_pp, t)
-```
-
-with one parametrization of the elastic dσ/dt evaluated at the p̄p and
-the pp sub-energies of the same event (`s_pbarp = (p_pbar + p_recoil)²`,
-`s_pp = (p_fromX + p_recoil)²`, `p_fromX = p_X − p_pbar`) at the event's
-first-vertex `t = (p_target − p_recoil)²` — or, with a `_den` key, a
-p̄p model in the numerator and a separate pp model in the denominator.
-The weight is written as the
-truth-ntuple branch `w_ratio`, together with `t`, `s_pbarp`, `s_pp`, and
-optionally to a sidecar file — one `%.6f` per line, parallel to the LUND,
-the same format Example 4 produces — via `ratio_weight_sidecar:`.
-
-Nothing is normalized: any overall constant in dσ/dt cancels in the
-ratio, so units do not matter and there is no max-1 rescaling.
-
-### Handing over dσ/dt
-
-Two ways, and they are checked against each other below:
+A different kind of weight from everything above: **carried**, not used
+to accept or reject, and there are **two per event**. The goal is a
+controlled test of extracting the ratio of p̄p to pp rescattering from
+`e p → e' p_recoil p p̄`. With `t = (p_target − p_recoil)²` and the two
+sub-energies `s_rpbar = (p_recoil + p_pbar)²`, `s_rp = (p_recoil +
+p_produced)²` (`p_produced = p_X − p_pbar`), the generator attaches
 
 ```
-ratio_weight_formula: exp((4.0 + 0.5*log(s))*t) * pow(s,-2)   # TFormula in s, t
+w_pbarp = sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)
+w_pp    = sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
+```
+
+— each hypothesis model at its own s, divided by the same generated
+`(s, t)` density evaluated at that point. The two hypothesis samples are
+the same events with different weights. Written as truth-ntuple branches
+`w_pbarp`, `w_pp`, `w_ratio` (their per-event ratio) alongside `t`,
+`s_pbarp`, `s_pp`, and optionally as a two-column sidecar
+(`ratio_weight_sidecar:`), one line per LUND event.
+
+Nothing is normalized: any overall constant in a model cancels in the
+extracted ratio, and `D_gen` is used as a density (counts / bin area).
+
+### The extraction
+
+```bash
+python extract_dsdt_ratio.py truth_weighted.root \
+    --formula "4.4817*exp(8.0*t)" --formula-den "exp(5.0*t)" \
+    --t-range=-2.5,0 --out ../dsdt_ratio.pdf
+```
+
+Exactly as with data: histogram `t` for events by their `s_rpbar` bin
+with weight `w_pbarp`, histogram `t` for events by their `s_rp` bin with
+weight `w_pp`, ratio per t bin, one panel per s bin, input
+`sigma_pbarp / sigma_pp` at the same s overlaid (`--formula[-den]` or
+`--table[-den]`). Prints `<R_extracted>` and the rms pull per s bin.
+`--unweighted` shows the symmetric baseline: the generator is symmetric
+under p ↔ p̄ from X, so the two histograms coincide and R = 1.
+
+Measured closures: a flat 2 (`ratio_weight_formula: 2`,
+`ratio_weight_formula_den: 1`) comes back as 1.96–2.04 in every s bin at
+200k events, rms pull 0.9. Two exponentials with a crossing,
+`sigma_pbarp = 4.48 exp(8t)`, `sigma_pp = exp(5t)` (ratio `4.48 exp(3t)`,
+= 1 at |t| = 0.5) come back on the input curve in every s bin, rms pull
+0.8–1.0.
+
+Note what the extraction can and cannot see: every event enters the
+numerator once (at its `s_rpbar`) and the denominator once (at its
+`s_rp`). With a *single* weight per event the two histograms always have
+the same total and a constant ratio is invisible — that is why there are
+two weights, one per hypothesis.
+
+### `D_gen`: model / generated
+
+```bash
+python build_dsdt_table.py --from-gen gen_truth_unweighted.root \
+    --s-range 3.4,12.4 --ns 45 --t-range=-14.2,0 --nt 142 --out ../dgen.root
+#   -> ratio_weight_gen: ../dgen.root dgen_s_t
+```
+
+`--from-gen` is not a model: it histograms the truth ntuple of an
+UNWEIGHTED run in `(s, t)` (filled with both s definitions, `--var` to
+pick one) and the generator looks it up **per bin**, so that dividing by
+it makes each weighted sample follow its model exactly cell by cell —
+the same model / generated construction as every other weight here.
+`--smooth` is available but costs that exactness. The report says what
+fraction of events would hit an empty cell (they get w = 0; 0.06 % at a
+500k-event denominator on a 45 × 142 grid).
+
+The extracted *ratio* does not need `D_gen` — the generator's shape is
+common to both sides and cancels. Each sample *individually* does:
+fitting the t slope of the `w_pbarp` sample in s bins gives 7.1–7.9
+without it (generator shape leaking in) and 8.00–8.02 with it, for an
+input of 8. Use it when the hypothesis samples are compared to data on
+their own, e.g. after GEMC.
+
+### Handing over the models
+
+Each of `sigma_pbarp` and `sigma_pp` is either a formula in the card or a
+TH2D table:
+
+```
+ratio_weight_formula:     4.4817*exp(8.0*t)     # TFormula in s, t
+ratio_weight_formula_den: exp(5.0*t)
 ```
 ```
-ratio_weight: dsdt_table.root log_dsdt_s_t                    # TH2D from this script
+ratio_weight:      dsdt_pbarp.root log_dsdt_s_t # tables from this script
+ratio_weight_den:  dsdt_pp.root    log_dsdt_s_t
 ratio_weight_mode: log
 ```
 
-Either can be paired with a separate denominator model,
-`ratio_weight_formula_den:` or `ratio_weight_den: <file> [<hist>]`
-(a `--log` table in the denominator needs the numerator to be `--log`
-too: `ratio_weight_mode` applies to both). Without one, the same model is
-evaluated at `s_pp`.
-
-The formula is evaluated by ROOT's `TFormula` per event; write it with
-`log` (natural) and `pow` so the identical string also works as
-`--formula` here. The table is the general path — fit the Ambats/White
-data in Python, or hand over a function or a CSV of points:
+Without a `_den` key the p̄p model is used for both (then the ratio is 1
+wherever `s_rpbar = s_rp`). Formulas are evaluated by ROOT's `TFormula`
+per event; write them with `log` (natural) and `pow` so the identical
+string also works as `--formula` here. Tables are the general path — fit
+the Ambats/White data in Python, or hand over a function or a CSV:
 
 ```bash
 python build_dsdt_table.py --formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)" \
     --s-range 3.4,12.4 --ns 90 --t-range=-14.2,0 --nt 200 --log \
-    --gen gen_truth.root --out ../dsdt_table.root
+    --gen gen_truth.root --out ../dsdt_pbarp.root
 python build_dsdt_table.py --xsec-py model.py:dsdt ...        # f(s, t) -> array
 python build_dsdt_table.py --table dsdt.csv --cols s,t,dsdt ...   # scattered points
 ```
@@ -602,72 +655,56 @@ read as a flag.
 ### Bin centers, not bin integrals
 
 The accept-reject builders above produce a per-bin ratio, so their
-numerator has to be the cross section **integrated** over the bin. This
-table is different: the generator reads it with `TH2::Interpolate`,
-bilinearly between bin **centers**, as a continuous function. So the
-function is evaluated *at* the centers, there is no `--supersample`, and
-the question is only whether a bilinear patch follows dσ/dt between
-neighbouring centers.
+numerator has to be the cross section **integrated** over the bin. A
+model table here is different: the generator reads it with
+`TH2::Interpolate`, bilinearly between bin **centers**, as a continuous
+function. So the function is evaluated *at* the centers, there is no
+`--supersample`, and the question is only whether a bilinear patch
+follows dσ/dt between neighbouring centers.
 
 For an exponential in `t` it does not, unless the grid is fine. Hence
 `--log`: the table then holds `ln dσ/dt`, the generator interpolates that
-and exponentiates (`ratio_weight_mode: log`), and an exponential becomes
-a plane. Measured with the formula above on 50 000 events:
+and exponentiates (`ratio_weight_mode: log`, which applies to both model
+tables), and an exponential becomes a plane. Measured on 50 000 events:
 
 | grid (s × t) | linear: median / max `|w_table/w_exact − 1|` | log: median / max |
 |---|---|---|
 | 90 × 200 | 3.5e-4 / 3.0e-3 | 6.7e-5 / 5e-4 |
 | 90 × 20  | 1.9e-2 / 2.8e-1, mean w biased −7 % | 6.7e-5 / 9e-2 (edge clamp) |
 
-Use `--log` unless dσ/dt crosses zero.
+Use `--log` unless dσ/dt crosses zero. (`D_gen` is looked up per bin and
+is never log.)
 
 ### `--gen`: coverage and error before you run
 
 Give `--gen` the truth ntuple of any previous run (the `t`, `s_pbarp`,
-`s_pp` branches are always written, weight or no weight). The script
+`s_pp` branches are always written, weights or no weights). The script
 prints the percentiles of the three variables, the fraction of events
 whose **both** `s` values and `t` fall inside the grid — the generator
-gives `w_ratio = 0` to the rest, and counts them under
-"outside dsigma/dt table" — and, with a model on the command line, the
-exact interpolation error the table will incur on those events. That
-number is what the generator will reproduce: in the test above the
-generator's own `w_ratio` and the script's prediction agreed to every
-printed digit. If the ntuple already carries a `w_ratio ≠ 1` (a run with
-`ratio_weight:`), it is compared to the model too, which is the
-table-vs-formula closure without a second run.
+gives w = 0 to the rest, and counts them under "outside dsigma/dt
+table" — and, for a model, the exact interpolation error the table will
+incur on those events. The generator reproduces that number to every
+printed digit.
 
-### Seeing what it does
+### Seeing the weights
 
 ```bash
-python plot_ratio_weight.py gen_truth.root --out ../ratio_weight.pdf \
-    --formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)"     # optional overlay
+python plot_ratio_weight.py truth_weighted.root --out ../ratio_weight.pdf \
+    --formula "4.4817*exp(8.0*t)" --formula-den "exp(5.0*t)"
 ```
 
-Three panels in `t`: the generated `dN/dt` with and without the weight
-(shapes, unit area), their ratio — the mean `w_ratio` in each `t` bin,
-both raw and with the integral fixed — and the per-event spread of
-`log10 w_ratio` at each `t`. The ratio panel is the reweighting factor
-the p̄p / pp hypothesis applies as a function of `t`. With `--formula`
-(and `--formula-den`) the **input** ratio is evaluated from the same
-truth branches and averaged in the same bins, so input and extracted sit
-on the same axes. Smallest closure:
-
-```
-ratio_weight_formula: 2
-ratio_weight_formula_den: 1
-```
-
-gives `w_ratio = 2` for every event and `python plot_ratio_weight.py
-truth.root --formula 2 --formula-den 1` shows extracted on input at 2 in
-every `t` bin.
+draws the per-event ratio `w_ratio = w_pbarp / w_pp` against `t` (its
+spread, its mean per t bin with the input overlaid, and the t spectrum
+weighted by it). This is the weight, **not** the extraction — for the
+extraction use `extract_dsdt_ratio.py`.
 
 ### Recomputing offline
 
-`w_ratio` is a deterministic function of the three truth branches, so it
-can always be rebuilt in numpy (`f(s_pbarp, t) / f(s_pp, t)`) — the
-formula path reproduces that to machine precision, the table path to the
-interpolation error above. The sidecar is the same numbers, in LUND
-order, for use downstream of GEMC.
+Both weights are deterministic functions of the truth branches `t`,
+`s_pbarp`, `s_pp` (and `D_gen`), so they can always be rebuilt in numpy —
+the formula path reproduces that to machine precision, a table to the
+interpolation error above. The sidecar carries the same two numbers, in
+LUND order, for use downstream of GEMC.
 
 ## Notes
 

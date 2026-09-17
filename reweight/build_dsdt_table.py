@@ -10,8 +10,21 @@ evaluated at the pbar-p and the p-p sub-energies of the same event, at the
 event's t. This script turns your parametrization into that TH2D. Nothing
 here is normalized -- any overall constant cancels in the ratio.
 
-Three ways to give dsigma/dt(s, t)
-----------------------------------
+Four ways to give dsigma/dt(s, t)
+---------------------------------
+    --from-gen truth.root
+        NOT a model: the generator's own (s, t) density D_gen, i.e. the
+        truth ntuple of an UNWEIGHTED run histogrammed in (s, t) on the
+        grid below. The generator divides each hypothesis model by it
+        (`ratio_weight_gen:`), so that the weighted sample follows the
+        model instead of model x generator shape -- the same model /
+        generated construction as every other weight here. It is looked
+        up PER BIN (no interpolation, no --log), which makes the closure
+        exact cell by cell. --var picks which s fills it: s_pbarp, s_pp
+        or both (default; the two are identically distributed in the
+        generator, so this is the same density with twice the entries).
+        --smooth <bins> Gaussian-filters the counts (costs exactness).
+        Output name defaults to dgen_s_t.
     --formula "exp((4.0 + 0.5*log(s))*t) * pow(s,-2)"
         a numpy expression in s and t (plus the functions in xsec.py's
         whitelist). Use `pow` and `log` (natural), so the identical string
@@ -142,6 +155,39 @@ def make_model(args):
 
 
 # --------------------------------------------------------------------- #
+# --from-gen: the generator's own (s, t) distribution as the model
+# --------------------------------------------------------------------- #
+def hist_from_gen(path, tree, var, s_edges, t_edges, smooth):
+    import uproot
+    if not os.path.exists(path):
+        raise SystemExit(f"--from-gen: file not found: {path}")
+    t = uproot.open(path)[tree]
+    need = ["s_pbarp", "s_pp", "t"]
+    missing = [b for b in need if b not in t.keys()]
+    if missing:
+        raise SystemExit(f"--from-gen {path}:{tree} lacks branches {missing}.")
+    a = t.arrays(need, library="np")
+    cols = ["s_pbarp", "s_pp"] if var == "both" else [var]
+    S = np.concatenate([a[c] for c in cols])
+    T = np.concatenate([a["t"] for _ in cols])
+    ok = np.isfinite(S) & np.isfinite(T)
+    H, _, _ = np.histogram2d(S[ok], T[ok], bins=[s_edges, t_edges])
+    n_in = int(H.sum())
+    print(f"[gen] {path}:{tree}: {len(a['t'])} events, filled with "
+          f"{'+'.join(cols)} -> {n_in} entries on the grid "
+          f"({100.0*n_in/max(ok.sum(),1):.1f}% of the fills), "
+          f"{int(np.sum(H == 0))}/{H.size} empty cells")
+    if smooth > 0:
+        from scipy.ndimage import gaussian_filter
+        H = gaussian_filter(H, sigma=smooth, mode="nearest")
+        print(f"[gen] Gaussian-smoothed with sigma = {smooth:g} bins")
+    # density: divide by the bin area so a non-uniform grid stays honest
+    area = np.outer(np.diff(s_edges), np.diff(t_edges))
+    D = H / area
+    return D, "from-gen: generated density D_gen(s, t) = dN/ds dt (per-bin lookup)"
+
+
+# --------------------------------------------------------------------- #
 # ROOT output
 # --------------------------------------------------------------------- #
 def write_th2(D, name, title, s_edges, t_edges, out):
@@ -206,12 +252,25 @@ def report_gen(path, tree, model, D, s_edges, t_edges, use_log):
     print(f"      grid s=[{s_edges[0]:g},{s_edges[-1]:g}] t=[{t_edges[0]:g},{t_edges[-1]:g}]: "
           f"{100.0*cov.mean():.2f}% of events inside (the rest get w_ratio = 0)")
 
-    # Interpolation error the table will incur, on the covered events.
-    exact = model(s1[cov], tt[cov]) / model(s2[cov], tt[cov])
+    # What the generator will compute on the covered events.
     num = table_lookup(D, s_edges, t_edges, s1[cov], tt[cov])
     den = table_lookup(D, s_edges, t_edges, s2[cov], tt[cov])
     if use_log:
         num, den = np.exp(num), np.exp(den)
+    w_tab = np.divide(num, den, out=np.zeros_like(num), where=den > 0)
+    if model is None:
+        # --from-gen: D_gen is looked up per bin. Report how many events
+        # would fall in an empty cell (they get w = 0 in the generator).
+        def cell(S_, T_):
+            i = np.clip(np.searchsorted(s_edges, S_, side="right") - 1, 0, D.shape[0] - 1)
+            j = np.clip(np.searchsorted(t_edges, T_, side="right") - 1, 0, D.shape[1] - 1)
+            return D[i, j]
+        empty = (cell(s1[cov], tt[cov]) <= 0) | (cell(s2[cov], tt[cov]) <= 0)
+        print(f"      D_gen per-bin lookup: {100.0*empty.mean():.3f}% of covered events "
+              f"hit an empty cell for s_pbarp or s_pp (w = 0 there); "
+              f"min occupied cell = {D[D > 0].min() * np.diff(s_edges).min() * np.diff(t_edges).min():.0f} entries")
+        return
+    exact = model(s1[cov], tt[cov]) / model(s2[cov], tt[cov])
     good = np.isfinite(exact) & (exact > 0) & np.isfinite(num) & (den > 0)
     if good.any():
         rel = np.abs(num[good] / den[good] / exact[good] - 1.0)
@@ -246,6 +305,13 @@ def main():
                    help="path/to/model.py:func with func(s, t) -> array")
     m.add_argument("--table", default=None,
                    help="CSV/npz of scattered (s, t, dsigma/dt) points")
+    m.add_argument("--from-gen", default=None,
+                   help="truth ntuple: histogram the generated (s, t) on the "
+                        "grid and use that as D(s, t)")
+    m.add_argument("--var", choices=("both", "s_pbarp", "s_pp"), default="both",
+                   help="which s fills the --from-gen histogram (default both)")
+    m.add_argument("--smooth", type=float, default=0.0,
+                   help="--from-gen: Gaussian filter sigma in bins (default 0)")
     m.add_argument("--cols", default="s,t,dsdt",
                    help="column names in --table (default s,t,dsdt)")
 
@@ -276,9 +342,22 @@ def main():
     if t_edges[-1] > 0:
         print(f"[warn] t axis reaches {t_edges[-1]:g} > 0; physical t is <= 0.")
 
-    model, label = make_model(args)
-    S, T = np.meshgrid(centers(s_edges), centers(t_edges), indexing="ij")
-    D = model(S, T)
+    if args.from_gen:
+        for k in ("formula", "xsec_py", "table"):
+            if getattr(args, k):
+                raise SystemExit("--from-gen cannot be combined with "
+                                 "--formula / --xsec-py / --table.")
+        if args.log:
+            raise SystemExit("--from-gen is looked up per bin; --log does not apply.")
+        D, label = hist_from_gen(args.from_gen, args.tree, args.var, s_edges,
+                                 t_edges, args.smooth)
+        model = None                       # a density, not a model
+        if args.gen is None:
+            args.gen = args.from_gen       # report coverage on the same events
+    else:
+        model, label = make_model(args)
+        S, T = np.meshgrid(centers(s_edges), centers(t_edges), indexing="ij")
+        D = model(S, T)
     print(f"[dsdt] {label}")
     n_bad = int(np.sum(~np.isfinite(D)))
     D = np.where(np.isfinite(D), D, 0.0)
@@ -292,7 +371,8 @@ def main():
     if D.max() <= 0:
         raise SystemExit("dsigma/dt is zero everywhere on the grid.")
 
-    name = args.name or ("log_dsdt_s_t" if args.log else "dsdt_s_t")
+    name = args.name or ("dgen_s_t" if args.from_gen else
+                         "log_dsdt_s_t" if args.log else "dsdt_s_t")
     stored = np.where(D > 0, np.log(np.where(D > 0, D, 1.0)), LOG_FLOOR) if args.log else D
     title = ("ln d#sigma/dt(s,t)" if args.log else "d#sigma/dt(s,t)") + \
             ";s [GeV^{2}];t [GeV^{2}]"
@@ -301,12 +381,17 @@ def main():
         report_gen(args.gen, args.tree, model, stored, s_edges, t_edges, args.log)
 
     write_th2(stored, name, title, s_edges, t_edges, args.out)
-    print(f"[write] {args.out}:{name}  ({'ln ' if args.log else ''}dsigma/dt, "
-          f"x = s, y = t)")
-    print("\nAdd to the generator's input card:")
-    print(f"    ratio_weight: {args.out} {name}")
-    print(f"    ratio_weight_mode: {'log' if args.log else 'linear'}")
-    print("    ratio_weight_sidecar: w_ratio.txt      # optional, next to the LUND")
+    if args.from_gen:
+        print(f"[write] {args.out}:{name}  (D_gen = dN/ds dt, x = s, y = t)")
+        print("\nAdd to the generator's input card (next to ratio_weight / _formula):")
+        print(f"    ratio_weight_gen: {args.out} {name}")
+    else:
+        print(f"[write] {args.out}:{name}  ({'ln ' if args.log else ''}dsigma/dt, "
+              f"x = s, y = t)")
+        print("\nAdd to the generator's input card:")
+        print(f"    ratio_weight: {args.out} {name}")
+        print(f"    ratio_weight_mode: {'log' if args.log else 'linear'}")
+        print("    ratio_weight_sidecar: w_resc.txt       # optional, next to the LUND")
 
 
 if __name__ == "__main__":

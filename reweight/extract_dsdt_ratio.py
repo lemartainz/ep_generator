@@ -11,20 +11,21 @@ and, exactly as one would with data, histogram t for the events whose
 s_rpbar falls in an s bin, histogram t for the events whose s_rp falls in
 that same s bin, and take the ratio bin by bin in t:
 
-    R_extracted(s, t) = dN/dt | s_rpbar in [s_lo, s_hi]
+    R_extracted(s, t) = dN/dt | s_rpbar in [s_lo, s_hi]   (pbar-p hypothesis, weight w_pbarp)
                         ---------------------------------
-                        dN/dt | s_rp    in [s_lo, s_hi]
+                        dN/dt | s_rp    in [s_lo, s_hi]   (p-p hypothesis,    weight w_pp)
 
-That ratio is what tells the two rescatterings apart (pbar-p: steeper
-slope, no quark interchange; p-p: flatter, wins at large |t|). This
-script does that extraction on a truth ntuple -- weighted by w_ratio when
-the run carried one -- and overlays the INPUT ratio R(s, t) at the bin
-centers, so a controlled test reads as "extracted on input, or not".
+The numerator is the pbar-p-hypothesis sample (each event weighted by
+w_pbarp = sigma_pbarp(s_rpbar, t) [/ D_gen]), the denominator the p-p one
+(w_pp = sigma_pp(s_rp, t) [/ D_gen]). That ratio is what tells the two
+rescatterings apart (pbar-p: steeper slope, no quark interchange; p-p:
+flatter, wins at large |t|). The INPUT ratio sigma_pbarp / sigma_pp at
+the same s is overlaid, so a controlled test reads as "extracted on
+input, or not".
 
-Unweighted, the generator is symmetric under p <-> pbar from X, so the
-two histograms are the same distribution and R_extracted == 1 within
-statistics. Whatever the weighting scheme imprints, this is what the
-data-style extraction sees of it.
+Unweighted (--unweighted, or a run without ratio keys) both weights are
+1: the generator is symmetric under p <-> pbar from X, so the two
+histograms are the same distribution and R_extracted == 1.
 
 Usage
 -----
@@ -59,7 +60,7 @@ def main():
     ap.add_argument("--t-range", default=None, help='"lo,hi" (write --t-range=-14,0)')
     ap.add_argument("--nbins", type=int, default=35, help="t bins (default 35)")
     ap.add_argument("--unweighted", action="store_true",
-                    help="ignore w_ratio even if the run carried one")
+                    help="ignore w_pbarp / w_pp even if the run carried them")
     ap.add_argument("--formula", default=None, help="input numerator model in s, t")
     ap.add_argument("--formula-den", default=None, help="input denominator model")
     ap.add_argument("--table", default=None, help="input numerator table file.root[:hist]")
@@ -70,17 +71,21 @@ def main():
 
     import uproot
     tr = uproot.open(args.gen)[args.tree]
-    need = ["t", "s_pbarp", "s_pp", "w_ratio"]
+    need = ["t", "s_pbarp", "s_pp", "w_pbarp", "w_pp"]
     missing = [b for b in need if b not in tr.keys()]
     if missing:
         raise SystemExit(f"{args.gen}:{args.tree} lacks {missing}")
     a = tr.arrays(need, library="np")
     ok = np.isfinite(a["t"]) & np.isfinite(a["s_pbarp"]) & np.isfinite(a["s_pp"])
     t, s1, s2 = a["t"][ok], a["s_pbarp"][ok], a["s_pp"][ok]
-    w = np.ones_like(t) if args.unweighted else a["w_ratio"][ok]
-    carried = not np.all(w == 1.0)
+    if args.unweighted:
+        wA = wB = np.ones_like(t)
+    else:
+        wA, wB = a["w_pbarp"][ok], a["w_pp"][ok]
+    carried = not (np.all(wA == 1.0) and np.all(wB == 1.0))
     print(f"[gen] {args.gen}: {len(t)} events, "
-          f"{'weighted by w_ratio (mean %.4f)' % w.mean() if carried else 'unweighted'}")
+          + (f"pbar-p hypothesis mean w_pbarp = {wA.mean():.4g}, "
+             f"p-p hypothesis mean w_pp = {wB.mean():.4g}" if carried else "unweighted"))
 
     if args.s_edges:
         s_edges = np.array([float(v) for v in args.s_edges.split(",")])
@@ -120,10 +125,10 @@ def main():
         s_lo, s_hi = s_edges[k], s_edges[k + 1]
         sel1 = (s1 >= s_lo) & (s1 < s_hi)      # events by their s_rpbar
         sel2 = (s2 >= s_lo) & (s2 < s_hi)      # events by their s_rp
-        n1, _ = np.histogram(t[sel1], bins=t_edges, weights=w[sel1])
-        n2, _ = np.histogram(t[sel2], bins=t_edges, weights=w[sel2])
-        v1, _ = np.histogram(t[sel1], bins=t_edges, weights=w[sel1] ** 2)
-        v2, _ = np.histogram(t[sel2], bins=t_edges, weights=w[sel2] ** 2)
+        n1, _ = np.histogram(t[sel1], bins=t_edges, weights=wA[sel1])
+        n2, _ = np.histogram(t[sel2], bins=t_edges, weights=wB[sel2])
+        v1, _ = np.histogram(t[sel1], bins=t_edges, weights=wA[sel1] ** 2)
+        v2, _ = np.histogram(t[sel2], bins=t_edges, weights=wB[sel2] ** 2)
         with np.errstate(divide="ignore", invalid="ignore"):
             R = np.where(n2 > 0, n1 / n2, np.nan)
             dR = R * np.sqrt(np.where(n1 > 0, v1 / n1**2, 0) + np.where(n2 > 0, v2 / n2**2, 0))
@@ -134,9 +139,9 @@ def main():
                                         height_ratios=[2, 1.3], hspace=0.06)
         ax = fig.add_subplot(inner[0]); axr = fig.add_subplot(inner[1], sharex=ax)
         ax.step(t_edges, np.r_[n1, n1[-1]], where="post", color="C3", lw=1.5,
-                label=r"$d N/dt\,|\,s_{r\bar p}$ in bin")
+                label=r"$\bar p p$ hyp.: $dN/dt\,|\,s_{r\bar p}$ in bin")
         ax.step(t_edges, np.r_[n2, n2[-1]], where="post", color="C0", lw=1.5,
-                label=r"$d N/dt\,|\,s_{rp}$ in bin")
+                label=r"$pp$ hyp.: $dN/dt\,|\,s_{rp}$ in bin")
         ax.set(yscale="log", title=f"s in [{s_lo:.2f}, {s_hi:.2f}] GeV$^2$")
         ax.set_ylabel("events / bin", fontsize=9)
         if k == 0:
@@ -152,7 +157,7 @@ def main():
         axr.set(ylim=(r_lo, r_hi), ylabel="ratio")
         axr.set_xlabel(r"$t$ [GeV$^2$]", fontsize=9)
         if k == 0:
-            axr.legend(frameon=False, fontsize=8, loc="upper left")
+            axr.legend(frameon=False, fontsize=7, loc="lower left")
 
         if R_in is not None and good.any():
             g = good & np.isfinite(R_in) & (dR > 0)
@@ -162,7 +167,7 @@ def main():
             summary.append((s_lo, s_hi, np.nanmean(R[good]), np.nan))
 
     fig.suptitle(r"extracted  $\frac{d\sigma/dt\,|\,s_{r\bar p}}{d\sigma/dt\,|\,s_{rp}}$"
-                 + ("  (sample weighted by $w_{ratio}$)" if carried else "  (unweighted sample)"),
+                 + (r"  ($\bar p p$ hypothesis / $pp$ hypothesis)" if carried else "  (unweighted sample)"),
                  fontsize=12, y=1.0)
     fig.savefig(args.out, bbox_inches="tight")
     print("      s bin              <R_extracted>   rms pull vs input")

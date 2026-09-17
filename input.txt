@@ -47,19 +47,21 @@ mass_9999: BW 2. 0.4
 # build_dsdt_table.py --gen to choose the (s, t) grid.
 # truth_ntuple: gen_truth.root
 
-# Carried ratio weight w_ratio = dsigma/dt(s_pbarp, t) / dsigma/dt(s_pp, t)
-# for the pbar-p vs p-p rescattering comparison. NOT an accept-reject:
-# every event is kept and the weight rides along (truth branch w_ratio,
-# optional sidecar file parallel to the LUND). One parametrization of
-# dsigma/dt(s, t), given either as a TH2D table from
-# reweight/build_dsdt_table.py (prefer --log + ratio_weight_mode: log) or
-# as a TFormula in s and t. Give one or the other, not both. An optional
-# _den model (table or formula) replaces the numerator model in the
-# denominator (pbar-p over p-p); e.g. formula 2 over formula_den 1 is a
-# flat ratio of 2, the simplest closure test.
-# ratio_weight: dsdt_table.root log_dsdt_s_t
+# Rescattering weights for the pbar-p vs p-p controlled test. NOT an
+# accept-reject: every event is kept and carries TWO weights,
+#   w_pbarp = sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)
+#   w_pp    = sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
+# (truth branches w_pbarp, w_pp; optional two-column sidecar). Each model
+# is a TFormula in s and t, or a TH2D table from
+# reweight/build_dsdt_table.py (prefer --log + ratio_weight_mode: log).
+# D_gen is the generated (s, t) density from an unweighted run
+# (build_dsdt_table.py --from-gen); optional, needed only for each sample
+# to follow its model on its own -- the extracted ratio does not need it.
+# ratio_weight_formula:     4.4817*exp(8.0*t)
+# ratio_weight_formula_den: exp(5.0*t)
+# ratio_weight:      dsdt_pbarp.root log_dsdt_s_t
+# ratio_weight_den:  dsdt_pp.root    log_dsdt_s_t
 # ratio_weight_mode: log
-# ratio_weight_formula: exp((4.0 + 0.5*log(s))*t) * pow(s,-2)
-# ratio_weight_den: dsdt_table_pp.root log_dsdt_s_t
-# ratio_weight_formula_den: exp((4.0 + 0.5*log(s))*t) * pow(s,-2)
-# ratio_weight_sidecar: w_ratio.txt
+# ratio_weight_gen:  dgen.root dgen_s_t
+
+# ratio_weight_sidecar: w_resc.txt

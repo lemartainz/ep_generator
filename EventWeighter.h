@@ -19,27 +19,36 @@
 // probability w.
 //
 // A third kind of weight is CARRIED rather than accept-rejected: every
-// event is kept and the weight travels with it (truth-ntuple branch
-// w_ratio, and a sidecar file next to the LUND). It is not normalized.
+// event is kept and the weights travel with it (truth-ntuple branches,
+// and a sidecar file next to the LUND). Nothing is normalized.
 //
-//   weighter.eventWeight(kin)              -- once the decay chain exists
+//   weighter.eventWeights(kin)             -- once the decay chain exists
 //
-//   ratio_weight:              <root file> [<hist>]  TH2D dsigma/dt(s, t)  default dsdt_s_t
-//   ratio_weight_mode:         linear | log          table holds dsigma/dt or ln(dsigma/dt)
+// Two rescattering hypotheses for e p -> e' p_recoil p pbar, each a
+// dsigma/dt(s, t) evaluated at its own sub-energy of the SAME event
+// (see ratioVars()):
+//
+//   w_pbarp = sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)   s_rpbar = (recoil + pbar)^2
+//   w_pp    = sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)   s_rp    = (recoil + produced p)^2
+//
+// D_gen(s, t) is the generator's own (s, t) density (optional; 1 when
+// absent). With it each weighted sample follows its sigma; without it
+// the two samples still have the RATIO sigma_pbarp / sigma_pp in every
+// (s, t) bin, because the two s definitions are distributed identically.
+// Extraction (reweight/extract_dsdt_ratio.py): the w_pbarp-weighted t
+// histogram binned in s_rpbar over the w_pp-weighted one binned in s_rp.
+//
+//   ratio_weight:              <root file> [<hist>]  TH2D sigma_pbarp(s, t)  default dsdt_s_t
 //   ratio_weight_formula:      <expression in s, t>  TFormula instead of a table
-//   ratio_weight_den:          <root file> [<hist>]  separate denominator table (optional)
-//   ratio_weight_formula_den:  <expression in s, t>  separate denominator formula (optional)
-//
-//   w_ratio = dsigma/dt_num(s_pbarp, t) / dsigma/dt_den(s_pp, t)
-//
-// for the pbar-p vs p-p rescattering comparison in e p -> e' p p pbar
-// (see ratioVars()). Without a _den key the SAME parametrization is used
-// in both places, evaluated at the two sub-energies; with one, the
-// numerator is the pbar-p model and the denominator the p-p model.
+//   ratio_weight_den:          <root file> [<hist>]  sigma_pp table   (default: same as pbarp)
+//   ratio_weight_formula_den:  <expression in s, t>  sigma_pp formula (default: same as pbarp)
+//   ratio_weight_mode:         linear | log          tables hold dsigma/dt or ln(dsigma/dt)
+//   ratio_weight_gen:          <root file> [<hist>]  TH2D D_gen(s, t)    default dgen_s_t,
+//                                                    per-bin lookup (build_dsdt_table.py --from-gen)
 //
 // To add a new weight: give WeightConfig a file/name pair and a parseKey
 // branch, load it in EventWeighter::load(), and evaluate it in
-// acceptElectron(), acceptEvent() or eventWeight() -- the generator does
+// acceptElectron(), acceptEvent() or eventWeights() -- the generator does
 // not change.
 //
 // Header-only so it can be #included straight into an ACLiC-compiled
@@ -122,6 +131,13 @@ struct WeightConfig {
     std::string ratio_weight_den_file;
     std::string ratio_weight_den_name = "dsdt_s_t";
     std::string ratio_formula_den;
+    // Optional generated (s, t) density D_gen, the denominator that turns
+    // a model into a weight (model / generated, like every other weight
+    // here). A per-bin histogram from build_dsdt_table.py --from-gen,
+    // looked up per bin so the weighted sample follows the model exactly
+    // in every cell. Empty: D_gen = 1.
+    std::string ratio_weight_gen_file;
+    std::string ratio_weight_gen_name = "dgen_s_t";
 
     // Consume one `key: value(s)` line of the input card (key already
     // stripped of its trailing colon). Returns true if the key belongs to
@@ -156,6 +172,8 @@ struct WeightConfig {
             readFileAndName(iss, ratio_weight_den_file, ratio_weight_den_name);
         } else if (key == "ratio_weight_formula_den") {
             ratio_formula_den = restOfLine(iss);
+        } else if (key == "ratio_weight_gen") {
+            readFileAndName(iss, ratio_weight_gen_file, ratio_weight_gen_name);
         } else {
             return false;
         }
@@ -259,7 +277,7 @@ public:
                          "both; ratio weight disabled." << std::endl;
         } else if (!cfg_.ratio_weight_file.empty()) {
             if (ratio_.open(cfg_.ratio_weight_file, cfg_.ratio_weight_name, "ratio_weight")) {
-                std::cout << "Ratio weight enabled (carried as w_ratio): "
+                std::cout << "Rescattering weights enabled (carried, w_pbarp / w_pp): "
                           << cfg_.ratio_weight_file << ":" << cfg_.ratio_weight_name
                           << "  (bilinear Interpolate on s, t; table holds "
                           << (cfg_.ratio_weight_log ? "ln dsigma/dt" : "dsigma/dt")
@@ -267,7 +285,7 @@ public:
             }
         } else if (!cfg_.ratio_formula.empty()) {
             if (formula_.load(cfg_.ratio_formula, "ratio_weight_formula")) {
-                std::cout << "Ratio weight enabled (carried as w_ratio): formula '"
+                std::cout << "Rescattering weights enabled (carried, w_pbarp / w_pp): formula '"
                           << cfg_.ratio_formula << "'  (TFormula in s, t)" << std::endl;
             }
         }
@@ -296,6 +314,18 @@ public:
                          "without a numerator (ratio_weight / ratio_weight_formula); "
                          "ignored." << std::endl;
         }
+        if (hasRatioStage() && !cfg_.ratio_weight_gen_file.empty()) {
+            if (gen_.open(cfg_.ratio_weight_gen_file, cfg_.ratio_weight_gen_name,
+                          "ratio_weight_gen")) {
+                std::cout << "  generated density D_gen(s, t): "
+                          << cfg_.ratio_weight_gen_file << ":"
+                          << cfg_.ratio_weight_gen_name
+                          << "  (per-bin lookup; weights = model / D_gen)" << std::endl;
+            }
+        } else if (hasRatioStage()) {
+            std::cout << "  no ratio_weight_gen: weights are the model values themselves"
+                      << std::endl;
+        }
 
         if (saved) saved->cd(); else gROOT->cd();
     }
@@ -306,6 +336,7 @@ public:
         xsec_.close();
         ratio_.close();
         ratio_den_.close();
+        gen_.close();
         formula_.reset();
         formula_den_.reset();
     }
@@ -334,11 +365,11 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // Carried weight: w_ratio = dsigma/dt(s_pbarp, t) / dsigma/dt(s_pp, t).
-    // Not an accept-reject -- the caller keeps every event and records
-    // the number. Returns 1.0 when the stage is off, 0.0 when the event
-    // cannot be weighted (wrong topology, outside the table, invalid
-    // dsigma/dt); each of those is counted for printSummary().
+    // Carried weights, one per rescattering hypothesis (see the header
+    // comment). Not an accept-reject -- the caller keeps every event and
+    // records both numbers. Both are 1.0 when the stage is off; an event
+    // that cannot be weighted (wrong topology, outside a table, invalid
+    // model or D_gen) gets 0.0 in both, and is counted for printSummary().
     // -----------------------------------------------------------------
     struct RatioVars {
         double s_pbarp = NAN;   // (p_pbar + p_recoil)^2
@@ -367,32 +398,44 @@ public:
         return true;
     }
 
+    struct RatioWeights {
+        double w_pbarp = 1.0;   // sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)
+        double w_pp    = 1.0;   // sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
+    };
+
     bool hasRatioStage() const { return ratio_.hist != nullptr || formula_.ok(); }
 
-    double eventWeight(const EventKinematics &kin, RatioVars *out = nullptr) const {
+    RatioWeights eventWeights(const EventKinematics &kin, RatioVars *out = nullptr) const {
         RatioVars rv;
         const bool ok = ratioVars(kin, rv);
         if (out) *out = rv;
-        if (!hasRatioStage()) return 1.0;
+        RatioWeights w;
+        if (!hasRatioStage()) return w;
         ++n_ratio_eval_;
-        if (!ok) { ++n_ratio_topology_; return 0.0; }
+        w.w_pbarp = w.w_pp = 0.0;
+        if (!ok) { ++n_ratio_topology_; return w; }
 
-        // Numerator: the pbar-p model at s_pbarp. Denominator: the p-p
-        // model at s_pp -- a separate table/formula if one was given,
-        // otherwise the same one.
+        // pbar-p hypothesis at s_rpbar; p-p hypothesis at s_rp with its
+        // own model if one was given, otherwise the same one.
         const bool own_den = ratio_den_.hist != nullptr || formula_den_.ok();
-        double num, den;
-        if (!dsdt(ratio_, formula_, rv.s_pbarp, rv.t, num)) return 0.0;
-        if (own_den) {
-            if (!dsdt(ratio_den_, formula_den_, rv.s_pp, rv.t, den)) return 0.0;
-        } else {
-            if (!dsdt(ratio_, formula_, rv.s_pp, rv.t, den)) return 0.0;
+        double a, b;
+        if (!dsdt(ratio_, formula_, rv.s_pbarp, rv.t, a)) return w;
+        if (own_den) { if (!dsdt(ratio_den_, formula_den_, rv.s_pp, rv.t, b)) return w; }
+        else         { if (!dsdt(ratio_,     formula_,     rv.s_pp, rv.t, b)) return w; }
+        if (!std::isfinite(a) || !std::isfinite(b) || a < 0.0 || b < 0.0) {
+            ++n_ratio_bad_; return w;
         }
-        if (!std::isfinite(num) || !std::isfinite(den) || den <= 0.0 || num < 0.0) {
-            ++n_ratio_bad_; return 0.0;
+        // Divide by the generated density at each point, if given.
+        if (gen_.hist) {
+            const double ga = gen_.binValue(rv.s_pbarp, rv.t);
+            const double gb = gen_.binValue(rv.s_pp,    rv.t);
+            if (!std::isfinite(ga) || !std::isfinite(gb) || ga <= 0.0 || gb <= 0.0) {
+                ++n_ratio_nogen_; return w;
+            }
+            a /= ga; b /= gb;
         }
-        const double w = num / den;
-        sum_w_ratio_ += w;
+        w.w_pbarp = a; w.w_pp = b;
+        sum_w_pbarp_ += a; sum_w_pp_ += b;
         return w;
     }
 
@@ -414,13 +457,15 @@ public:
                << " electron proposals before decay" << std::endl;
         }
         if (hasRatioStage()) {
-            const long long n_ok = n_ratio_eval_ - n_ratio_out_
-                                 - n_ratio_bad_ - n_ratio_topology_;
-            os << "  ratio weight w_ratio (carried, not accept-reject): "
-               << n_ratio_eval_ << " events, mean w = "
-               << (n_ok > 0 ? sum_w_ratio_ / n_ok : 0.0) << std::endl;
+            const long long n_ok = n_ratio_eval_ - n_ratio_out_ - n_ratio_bad_
+                                 - n_ratio_topology_ - n_ratio_nogen_;
+            os << "  rescattering weights (carried, not accept-reject): "
+               << n_ratio_eval_ << " events, mean w_pbarp = "
+               << (n_ok > 0 ? sum_w_pbarp_ / n_ok : 0.0) << ", mean w_pp = "
+               << (n_ok > 0 ? sum_w_pp_ / n_ok : 0.0) << std::endl;
             os << "    - outside dsigma/dt table (w=0):   " << n_ratio_out_ << std::endl;
             os << "    - zero/invalid dsigma/dt (w=0):    " << n_ratio_bad_ << std::endl;
+            os << "    - empty D_gen cell (w=0):          " << n_ratio_nogen_ << std::endl;
             os << "    - no unique antiproton (w=0):      " << n_ratio_topology_ << std::endl;
         }
     }
@@ -489,6 +534,14 @@ private:
         double interpolateClamped(double x, double y) const {
             return hist->Interpolate(clampToCenters(hist->GetXaxis(), x),
                                      clampToCenters(hist->GetYaxis(), y));
+        }
+        // For a binned density: the content of the bin the point falls
+        // in, 0 outside the range. Dividing by this per bin makes the
+        // weighted sample follow the model exactly cell by cell.
+        double binValue(double x, double y) const {
+            if (!covers(x, y)) return 0.0;
+            return hist->GetBinContent(hist->GetXaxis()->FindBin(x),
+                                       hist->GetYaxis()->FindBin(y));
         }
     };
 
@@ -626,17 +679,20 @@ private:
     Formula   formula_;    // ratio_weight_formula
     Surface2D ratio_den_;  // ratio_weight_den (optional denominator table)
     Formula   formula_den_;// ratio_weight_formula_den
+    Surface2D gen_;        // ratio_weight_gen (optional generated density)
 
     long long n_reject_electron_ = 0;
     long long n_reject_mom_      = 0;
     long long n_reject_xsec_     = 0;
-    // eventWeight() is const (it does not change the physics); the
+    // eventWeights() is const (it does not change the physics); the
     // bookkeeping is mutable.
     mutable long long n_ratio_eval_     = 0;
     mutable long long n_ratio_out_      = 0;
     mutable long long n_ratio_bad_      = 0;
     mutable long long n_ratio_topology_ = 0;
-    mutable double    sum_w_ratio_      = 0.0;
+    mutable long long n_ratio_nogen_    = 0;
+    mutable double    sum_w_pbarp_      = 0.0;
+    mutable double    sum_w_pp_         = 0.0;
 };
 
 #endif // EVENT_WEIGHTER_H
