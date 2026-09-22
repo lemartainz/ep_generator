@@ -211,9 +211,12 @@ struct ReadInput {
     // as the denominator, and plot_xsec_closure.py as the generated
     // distribution to compare against the cross section.
     std::string truth_ntuple_file;
-    // Optional sidecar for the carried rescattering weights (ratio_weight
-    // / ratio_weight_formula in EventWeighter.h): one line per LUND event,
-    // "w_pbarp w_pp".
+    // Optional sidecar for the carried rescattering weights
+    // (ratio_weight / ratio_weight_formula with ratio_weight_apply: carry
+    // in EventWeighter.h): one line per LUND event, "w_pbarp w_pp".
+    // In the default accept-reject mode the weights are already in the
+    // sample, so the sidecar is written but every line is a diagnostic
+    // rather than something to apply.
     std::string ratio_sidecar_file;
 };
 
@@ -926,7 +929,10 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     // Also store the scattered electron and W for each accepted event (for plots/debug)
     std::vector<TLorentzVector> accepted_scattered;
     std::vector<TLorentzVector> accepted_W;
-    std::vector<EventWeighter::RatioWeights> accepted_w;   // carried weights, 1 when off
+    // The two rescattering weights of each accepted event (both 1 when
+    // the stage is off). In accept-reject mode they are already folded
+    // into the sample; they are kept for the ntuple and the sidecar.
+    std::vector<EventWeighter::RatioWeights> accepted_w;
 
     // Optional truth ntuple. Opened AFTER every histogram above has been
     // constructed, so none of them end up owned by this file and deleted
@@ -934,7 +940,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     TFile *truth_tf = nullptr;
     TTree *truth_tree = nullptr;
     double nt_Q2 = 0, nt_W = 0, nt_M = 0, nt_Ep = 0, nt_theta = 0;
-    double nt_w_pbarp = 1, nt_w_pp = 1, nt_w_ratio = 1;
+    double nt_w_pbarp = 1, nt_w_pp = 1, nt_w_ratio = 1, nt_w_event = 1;
     double nt_t = 0, nt_s_pbarp = 0, nt_s_pp = 0;
     if (!input.truth_ntuple_file.empty()) {
         truth_tf = TFile::Open(input.truth_ntuple_file.c_str(), "RECREATE");
@@ -956,11 +962,15 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             truth_tree->Branch("w_pbarp", &nt_w_pbarp, "w_pbarp/D");
             truth_tree->Branch("w_pp",    &nt_w_pp,    "w_pp/D");
             truth_tree->Branch("w_ratio", &nt_w_ratio, "w_ratio/D");
+            // What the generated distribution was multiplied by: both
+            // subsystems of this final state.
+            truth_tree->Branch("w_event", &nt_w_event, "w_event/D");
             truth_tree->Branch("t",       &nt_t,       "t/D");
             truth_tree->Branch("s_pbarp", &nt_s_pbarp, "s_pbarp/D");
             truth_tree->Branch("s_pp",    &nt_s_pp,    "s_pp/D");
             cout << "Truth ntuple enabled: " << input.truth_ntuple_file
-                 << ":truth  (Q2, W, M, Ep, theta_e, w_pbarp, w_pp, w_ratio, t, s_pbarp, s_pp)"
+                 << ":truth  (Q2, W, M, Ep, theta_e, w_pbarp, w_pp, w_ratio, "
+                    "w_event, t, s_pbarp, s_pp)"
                  << endl;
         }
     }
@@ -1058,11 +1068,18 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         kin.have_vertex = true;
         if (!weighter.acceptEvent(kin, gen.rnd)) continue;
 
-        // Carried rescattering weights (ratio_weight): the event is kept
-        // whatever the values; they ride along in the truth ntuple and
-        // the sidecar.
+        // Rescattering stage (ratio_weight). The one ep -> e'p p pbar
+        // final state holds both rescattering subsystems, so the event
+        // carries a weight for each and, in the default accept-reject
+        // mode, is kept with probability (w_pbarp * w_pp) / w_max -- the
+        // generated distribution multiplied by both weights. In carry
+        // mode nothing is selected and the weights ride along in the
+        // truth ntuple and the sidecar instead.
         EventWeighter::RatioVars rv;
-        const EventWeighter::RatioWeights w_resc = weighter.eventWeights(kin, &rv);
+        const EventWeighter::RatioAccept resc =
+            weighter.acceptRescattering(kin, gen.rnd, &rv);
+        if (!resc.keep) continue;
+        const EventWeighter::RatioWeights w_resc = resc.w;
 
         // Truth row for the ACCEPTED event: the generator's own density in
         // the weighting variables, after every accept-reject stage.
@@ -1075,6 +1092,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             nt_w_pbarp = w_resc.w_pbarp;
             nt_w_pp    = w_resc.w_pp;
             nt_w_ratio = (w_resc.w_pp > 0.0) ? w_resc.w_pbarp / w_resc.w_pp : 0.0;
+            nt_w_event = w_resc.applied();
             nt_t       = rv.t;
             nt_s_pbarp = rv.s_pbarp;
             nt_s_pp    = rv.s_pp;

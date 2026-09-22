@@ -107,10 +107,12 @@ Any lines beginning with # are ignored.
 | mom_weight  | Weight surface `w(p_lead, p_sub)` applied as a second accept-reject after the event is built | string |
 | xsec_weight | 3-D weight surface `w(Q^2, W, M_X)` applied as a third accept-reject after the decay chain: `<root file> [<hist name>]` (name defaults to `w_Q2_W_M`) | string |
 | xsec_weight_mode | How to read that TH3D: `bin` (default, per-bin lookup) or `interp` (trilinear) | string |
-| ratio_weight, ratio_weight_formula | p̄p rescattering model `σ_p̄p(s, t)`: a TH2D table `<root file> [<hist>]` (name defaults to `dsdt_s_t`) or a `TFormula` in `s`, `t`. Turns on the two **carried** rescattering weights (see [Rescattering weights](#rescattering-weights-pp-vs-pp)) | string |
+| ratio_weight, ratio_weight_formula | p̄p rescattering model `σ_p̄p(s, t)`: a TH2D table `<root file> [<hist>]` (name defaults to `dsdt_s_t`) or a `TFormula` in `s`, `t`. Turns on the rescattering stage (see [Rescattering weights](#rescattering-weights-pp-and-pp)) | string |
 | ratio_weight_den, ratio_weight_formula_den | pp rescattering model `σ_pp(s, t)`, table or formula; without one the p̄p model is used for both | string |
 | ratio_weight_gen | Generated `(s, t)` density `D_gen` from `build_dsdt_table.py --from-gen` (name defaults to `dgen_s_t`), per-bin lookup; weights are model / `D_gen`. Without it the weights are the model values | string |
 | ratio_weight_mode | Whether the model tables hold `dσ/dt` (`linear`, default) or `ln dσ/dt` (`log`, built with `--log`; recommended) | string |
+| ratio_weight_apply | `accept` (default): accept-reject on `w_pbarp · w_pp`, one unweighted sample out. `carry`: keep every event and record both weights instead | string |
+| ratio_weight_max | Accept-reject ceiling on `w_pbarp · w_pp` — any number at or above its maximum, a plain constant included. Omit to scan the tables and the `D_gen` grid at load time (a formula model with neither has no grid, so there it is required) | float |
 | ratio_weight_sidecar | Write the two weights per event, `w_pbarp w_pp`, one line per LUND event | string |
 | truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e, w_pbarp, w_pp, w_ratio, t, s_pbarp, s_pp)` to this ROOT file | string |
 
@@ -149,17 +151,17 @@ the generator's own code either. Everything weighting-related lives in
   `Q2`, `Ep`, `W`, `M_X`, the truth first-vertex 4-vectors
   (`q`, `p_target`, `p_recoil`, `p_X`) and a pointer to the final-state
   particle list.
-- `EventWeighter` — loads the ROOT histograms once and exposes two
-  accept-reject stages and one carried weight the generator calls:
+- `EventWeighter` — loads the ROOT histograms once and exposes the
+  accept-reject stages the generator calls:
 
   ```cpp
   EventWeighter weighter(input.weights);
   weighter.load();
   ...
-  weighter.acceptElectron(Q2, Ep, rnd);   // inside the electron sampler
-  weighter.acceptEvent(kin, rnd);         // after the full decay chain
-  auto w = weighter.eventWeights(kin);    // carried w_pbarp, w_pp (1 when off)
-  weighter.printSummary(cout);            // rejection counts per surface
+  weighter.acceptElectron(Q2, Ep, rnd);        // inside the electron sampler
+  weighter.acceptEvent(kin, rnd);              // after the full decay chain
+  auto r = weighter.acceptRescattering(kin, rnd);  // r.keep, r.w.w_pbarp, r.w.w_pp
+  weighter.printSummary(cout);                 // rejection counts per surface
   ```
 
   It also keeps the per-stage rejection counters, so the generator's
@@ -169,8 +171,8 @@ To add a new weight surface: give `WeightConfig` a file/name pair and a
 `parseKey` branch, load it in `EventWeighter::load()`, and evaluate it in
 `acceptElectron()` (if it depends only on the scattered electron),
 `acceptEvent()` (if it needs the decayed event) or `eventWeights()` (if
-it should be carried rather than used to reject). `runEventGenerator.cpp`
-does not change.
+it belongs with the rescattering weights the event carries).
+`runEventGenerator.cpp` does not change.
 
 A separate script writes a `TH2D` of accept probabilities to a ROOT file;
 the weighter loads it once and evaluates it with `TH2::Interpolate` —
@@ -245,36 +247,97 @@ Inspect a surface before running with
 `python reweight/plot_weight.py weight_func.root w_Q2_Ep`. Full details in
 [reweight/README_reweight.md](reweight/README_reweight.md).
 
-### Rescattering weights (p̄p vs pp)
+### Rescattering weights (p̄p and pp)
 
-A controlled test for extracting the ratio of p̄p to pp rescattering from
-`e p → e' p_recoil p p̄` (tying the small-|t| Ambats et al. and
-large-|t| White et al. elastic ratios together). Define, per event and
-from truth 4-vectors,
+Rescattering in `e p → e' p_recoil p p̄` — a controlled test for
+extracting the ratio of p̄p to pp rescattering (tying the small-|t|
+Ambats et al. and large-|t| White et al. elastic ratios together).
+Define, per event and from truth 4-vectors,
 
 - `t = (p_target − p_recoil)²` — the target–recoil momentum transfer,
-  the same for both hypotheses;
+  shared by both subsystems;
 - `s_rp̄ = (p_recoil + p_p̄)²` — the p̄p rescattering system;
 - `s_rp = (p_recoil + p_produced)²` — the pp rescattering system, with
   `p_produced = p_X − p_p̄` (exact by conservation, so the two protons
   never have to be told apart).
 
-Then each event gets **two carried weights**, one per hypothesis, each a
-model `dσ/dt(s, t)` evaluated at its own sub-energy and divided by the
+The final state holds **both** subsystems, so every event carries two
+weights, each a model `dσ/dt(s, t)` at its own sub-energy divided by the
 generator's own `(s, t)` density:
 
 ```
-w_pbarp = σ_p̄p(s_rp̄, t) / D_gen(s_rp̄, t)      p̄p-rescattering hypothesis
-w_pp    = σ_pp (s_rp,  t) / D_gen(s_rp,  t)      pp-rescattering hypothesis
+w_pbarp = σ_p̄p(s_rp̄, t) / D_gen(s_rp̄, t)      p̄p rescattering
+w_pp    = σ_pp (s_rp,  t) / D_gen(s_rp,  t)      pp rescattering
 ```
 
 `D_gen` is one histogram — the truth ntuple of an unweighted run binned
-in `(s, t)` — evaluated at two different points. The p̄p-hypothesis
-sample and the pp-hypothesis sample are the *same events* with different
-weights attached. Nothing is accept-rejected and nothing is normalized:
-every event is kept, and the weights ride along as truth-ntuple branches
-`w_pbarp`, `w_pp` (plus their per-event ratio `w_ratio`) and, with
-`ratio_weight_sidecar:`, as two columns per LUND event.
+in `(s, t)` — evaluated at two different points.
+
+The generator then **accept-rejects on their product**, keeping the
+event with probability `(w_pbarp · w_pp) / w_max`. What comes out is one
+unweighted `e p → e' p_recoil p p̄` sample, one LUND file, the full
+reaction exactly as in an unweighted run, distributed as
+
+```
+D_gen × w_pbarp × w_pp
+```
+
+— the generated distribution multiplied by both weights, each factor
+reshaping its own subsystem. Nothing downstream has to apply a weight.
+
+`w_max` comes from `ratio_weight_max:`, any number at or above the
+product's maximum (a plain constant is fine; too high only costs
+efficiency). Omit it and it is scanned off the model tables and the
+`D_gen` grid when they load — a formula model with neither has no grid
+to scan, so there the key is required and the stage refuses to run
+without it. Events whose product exceeds the ceiling are clamped to
+accept and counted, so a ceiling set too low shows up in the run summary
+rather than silently flattening the sample:
+
+```
+  rescattering weights (accept-reject on w_pbarp * w_pp): 4107048 events weighted, ...
+    - ceiling w_max on w_pbarp * w_pp: 2  (ratio_weight_max)
+    - kept:                            40000
+    - rejected:                        4067048
+```
+
+Closure (`σ_p̄p = e^{2t}(1 + 0.1 s)`, `σ_pp = e^{t}`, 40k accepted
+against a 300k carried reference): the accepted sample matches the
+reference reweighted by `w_pbarp · w_pp` with χ²/ndf = 0.75, 1.02, 1.04,
+0.56, 0.66 over 20 bins of `t`, `s_rp̄`, `s_rp`, `Q²` and `W`.
+
+Card:
+
+```
+ratio_weight_formula:      exp(2.0*t)*(1.0+0.1*s)   # sigma_pbarp(s, t)
+ratio_weight_formula_den:  exp(1.0*t)               # sigma_pp(s, t)
+ratio_weight_max:          2.0                      # ceiling on the product
+ratio_weight_gen:          dgen.root dgen_s_t       # optional D_gen
+```
+
+or tables built in Python (`ratio_weight:` / `ratio_weight_den:`, from
+`reweight/build_dsdt_table.py`, which takes a formula, a Python
+`f(s, t)` or a CSV of points; prefer `--log` with
+`ratio_weight_mode: log`). With tables the ceiling can be left out:
+
+```
+  accept-reject ceiling scanned over 14400 (s, t) grid points:
+    max w_pbarp = 3.20175, max w_pp = 0.959189 -> w_max = 3.22464
+```
+
+A point outside a table's range has no model value, so the event is
+rejected and counted under `outside dsigma/dt table`. Keep the grid
+wider than the `(s, t)` the run populates.
+
+#### Carried weights (`ratio_weight_apply: carry`)
+
+`ratio_weight_apply: carry` turns the selection off: every event is
+kept, nothing is normalized, and the weights ride along as truth-ntuple
+branches `w_pbarp`, `w_pp`, their ratio `w_ratio` and their product
+`w_event` — plus, with `ratio_weight_sidecar:`, two columns per LUND
+event. This is the mode for measuring a ratio out of a *single* sample,
+and for the reference histogram a closure check compares the accepted
+sample against.
 
 **Extraction** (`reweight/extract_dsdt_ratio.py`), exactly as with data:
 histogram `t` for events by their `s_rp̄` bin weighted with `w_pbarp`,
@@ -294,24 +357,12 @@ comes back as 1.96–2.04 in every s bin (200k events, rms pull 0.9); with
 
 Two things `D_gen` does and does not do. The extracted *ratio* is right
 with or without it, because the generator's shape is common to both
-sides. Each hypothesis sample *on its own* follows its σ only with it:
+sides. Each weighted spectrum *on its own* follows its σ only with it:
 fitting the t slope of the `w_pbarp`-weighted sample gives 7.1–7.9
-without `D_gen` (generator shape leaking in) and 8.00–8.02 with it. Use
-it whenever the samples are compared to data individually, e.g. after
-GEMC.
+without `D_gen` (generator shape leaking in) and 8.00–8.02 with it. The
+same holds factor by factor in accept-reject mode.
 
-Card:
-
-```
-ratio_weight_formula:      4.4817*exp(8.0*t)        # sigma_pbarp(s, t)
-ratio_weight_formula_den:  exp(5.0*t)               # sigma_pp(s, t)
-ratio_weight_gen:          dgen.root dgen_s_t       # optional D_gen
-ratio_weight_sidecar:      w_resc.txt
-```
-
-or tables built in Python (`ratio_weight:` / `ratio_weight_den:`, from
-`reweight/build_dsdt_table.py`, which takes a formula, a Python
-`f(s, t)` or a CSV of points; prefer `--log`). Workflow:
+Workflow:
 
 ```bash
 # 1. unweighted run with `truth_ntuple: gen_truth.root`
@@ -326,8 +377,8 @@ python extract_dsdt_ratio.py gen_truth_weighted.root \
 ```
 
 Because `s_rp̄`, `s_rp` and `t` are in the truth ntuple, both weights can
-always be recomputed offline; `plot_ratio_weight.py` shows the per-event
-ratio `w_pbarp / w_pp` against `t`.
+always be recomputed offline in either mode; `plot_ratio_weight.py`
+shows the per-event ratio `w_pbarp / w_pp` against `t`.
 
 ## Example usage
 

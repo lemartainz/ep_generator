@@ -146,6 +146,9 @@ def compute_kinematics_batch(path):
         "theta_e": np.degrees(p_e.theta),
         "phi_e":   np.degrees(p_e.phi),
         "Ep":      p_e.E,
+        "e": p_e,
+        "p_beam": p_beam,
+        "p_target": p_target,
     }
 
     has_pp = np.asarray(has_pp)
@@ -157,6 +160,10 @@ def compute_kinematics_batch(path):
         p_miss  = p_beam + p_target - p_p1 - p_p2 - p_e
         out["MM"]     = np.where(has_pp, p_miss.mass, np.nan)
         out["Mppbar"] = np.where(has_pp, (p_p1 + p_p2).mass, np.nan)
+
+        out['p1'] = p_p1
+        out['p2'] = p_p2
+        out['p_miss'] = p_miss
 
     return out
 

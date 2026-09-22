@@ -1,5 +1,5 @@
 # This is the beginning of adding in an input file for the event generator class
-num_events:     100000
+num_events:     300000
 beam_energy:    10.2
 W_min:          2.85
 target_pid:     2212
@@ -40,28 +40,46 @@ mass_9999: BW 2. 0.4
 # xsec_weight: xsec_weight.root w_Q2_W_M
 # xsec_weight_mode: bin
 
-# Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e, w_ratio, t,
-# s_pbarp, s_pp). Needed to measure the proposal density for
+# Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e, w_pbarp, w_pp,
+# w_ratio, w_event, t, s_pbarp, s_pp). Needed to measure the proposal density for
 # build_xsec_weight3d.py (the 3-D proposal is not flat), read by
 # reweight/plot_xsec_closure.py for the closure plots, and by
 # build_dsdt_table.py --gen to choose the (s, t) grid.
-# truth_ntuple: gen_truth.root
+truth_ntuple: gen_truth.root
 
-# Rescattering weights for the pbar-p vs p-p controlled test. NOT an
-# accept-reject: every event is kept and carries TWO weights,
+# Rescattering weights. The one ep -> e'p p pbar final state holds BOTH
+# rescattering subsystems, so every event gets two weights,
 #   w_pbarp = sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)
 #   w_pp    = sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
-# (truth branches w_pbarp, w_pp; optional two-column sidecar). Each model
-# is a TFormula in s and t, or a TH2D table from
+# and a FOURTH accept-reject keeps it with probability
+# (w_pbarp * w_pp) / w_max. The single sample that comes out is
+# unweighted and distributed as D_gen x w_pbarp x w_pp -- the generated
+# distribution multiplied by both weights, each factor reshaping its own
+# subsystem. One LUND file, the full reaction, as in an unweighted run.
+#
+# Each model is a TFormula in s and t, or a TH2D table from
 # reweight/build_dsdt_table.py (prefer --log + ratio_weight_mode: log).
 # D_gen is the generated (s, t) density from an unweighted run
-# (build_dsdt_table.py --from-gen); optional, needed only for each sample
-# to follow its model on its own -- the extracted ratio does not need it.
-# ratio_weight_formula:     4.4817*exp(8.0*t)
-# ratio_weight_formula_den: exp(5.0*t)
+# (build_dsdt_table.py --from-gen); optional, and what makes each factor
+# reproduce its sigma rather than sigma x D_gen.
+#
+# ratio_weight_max is the accept-reject ceiling on the product: any
+# number at or above max(w_pbarp * w_pp), a plain constant included. Too
+# high only costs efficiency. Omit it and the ceiling is scanned off the
+# tables and the D_gen grid at load time -- but a formula model with
+# neither has no grid to scan, so there it is required. Events whose
+# product exceeds the ceiling are clamped and counted in the run summary.
+#
+# ratio_weight_apply: carry turns the selection off instead: every event
+# kept, both weights carried (truth branches w_pbarp, w_pp, w_ratio,
+# w_event; optional two-column sidecar).
+ratio_weight_formula:     exp(4.0*t+3)
+ratio_weight_formula_den: exp(2.0*t+1)
+ratio_weight_max:  6.0
 # ratio_weight:      dsdt_pbarp.root log_dsdt_s_t
 # ratio_weight_den:  dsdt_pp.root    log_dsdt_s_t
 # ratio_weight_mode: log
 # ratio_weight_gen:  dgen.root dgen_s_t
+ratio_weight_apply: accept
 
 # ratio_weight_sidecar: w_resc.txt

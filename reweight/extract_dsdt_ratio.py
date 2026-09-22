@@ -97,7 +97,7 @@ def main():
     else:
         lo, hi = float(t.min()), float(t.max())
     t_edges = np.linspace(lo, hi, args.nbins + 1)
-    tc = 0.5 * (t_edges[:-1] + t_edges[1:])
+    tc = -0.5 * (t_edges[:-1] + t_edges[1:])
     r_lo, r_hi = (float(v) for v in args.ratio_range.split(","))
 
     # input R(s, t) = num(s, t) / den(s, t) at the SAME s: what the
@@ -138,9 +138,9 @@ def main():
         inner = GridSpecFromSubplotSpec(2, 1, subplot_spec=outer[k // ncol, k % ncol],
                                         height_ratios=[2, 1.3], hspace=0.06)
         ax = fig.add_subplot(inner[0]); axr = fig.add_subplot(inner[1], sharex=ax)
-        ax.step(t_edges, np.r_[n1, n1[-1]], where="post", color="C3", lw=1.5,
+        ax.step(-t_edges, np.r_[n1, n1[-1]], where="post", color="C3", lw=1.5,
                 label=r"$\bar p p$ hyp.: $dN/dt\,|\,s_{r\bar p}$ in bin")
-        ax.step(t_edges, np.r_[n2, n2[-1]], where="post", color="C0", lw=1.5,
+        ax.step(-t_edges, np.r_[n2, n2[-1]], where="post", color="C0", lw=1.5,
                 label=r"$pp$ hyp.: $dN/dt\,|\,s_{rp}$ in bin")
         ax.set(yscale="log", title=f"s in [{s_lo:.2f}, {s_hi:.2f}] GeV$^2$")
         ax.set_ylabel("events / bin", fontsize=9)
@@ -154,8 +154,8 @@ def main():
         if R_in is not None:
             axr.plot(tc, R_in, "-", color="C2", lw=2, label="input R(s, t)")
         axr.axhline(1.0, color="0.6", lw=0.8)
-        axr.set(ylim=(r_lo, r_hi), ylabel="ratio")
-        axr.set_xlabel(r"$t$ [GeV$^2$]", fontsize=9)
+        axr.set(ylim=(r_lo-0.5, r_hi), ylabel="ratio")
+        axr.set_xlabel(r"$|t|$ [GeV$^2$]", fontsize=9)
         if k == 0:
             axr.legend(frameon=False, fontsize=7, loc="lower left")
 

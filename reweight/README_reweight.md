@@ -545,10 +545,9 @@ data-driven builder to correct toward measured data.
 
 ## Rescattering weights: p̄p vs pp (`build_dsdt_table.py`, `extract_dsdt_ratio.py`)
 
-A different kind of weight from everything above: **carried**, not used
-to accept or reject, and there are **two per event**. The goal is a
-controlled test of extracting the ratio of p̄p to pp rescattering from
-`e p → e' p_recoil p p̄`. With `t = (p_target − p_recoil)²` and the two
+A different kind of weight from everything above: there are **two per
+event**, because the one `e p → e' p_recoil p p̄` final state holds both
+rescattering subsystems. With `t = (p_target − p_recoil)²` and the two
 sub-energies `s_rpbar = (p_recoil + p_pbar)²`, `s_rp = (p_recoil +
 p_produced)²` (`p_produced = p_X − p_pbar`), the generator attaches
 
@@ -557,15 +556,27 @@ w_pbarp = sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)
 w_pp    = sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
 ```
 
-— each hypothesis model at its own s, divided by the same generated
-`(s, t)` density evaluated at that point. The two hypothesis samples are
-the same events with different weights. Written as truth-ntuple branches
-`w_pbarp`, `w_pp`, `w_ratio` (their per-event ratio) alongside `t`,
-`s_pbarp`, `s_pp`, and optionally as a two-column sidecar
-(`ratio_weight_sidecar:`), one line per LUND event.
+— each model at its own s, divided by the same generated `(s, t)`
+density evaluated at that point. Both are written as truth-ntuple
+branches `w_pbarp`, `w_pp`, `w_ratio` (their ratio) and `w_event` (their
+product), alongside `t`, `s_pbarp`, `s_pp`, and optionally as a
+two-column sidecar (`ratio_weight_sidecar:`), one line per LUND event.
 
-Nothing is normalized: any overall constant in a model cancels in the
-extracted ratio, and `D_gen` is used as a density (counts / bin area).
+**Which mode the run used matters for everything below.** By default
+(`ratio_weight_apply: accept`) the generator accept-rejects on
+`w_pbarp · w_pp`, so the weights are *already in the sample*: it is one
+unweighted LUND file distributed as `D_gen × w_pbarp × w_pp`, and
+re-weighting it by the ntuple branches would apply them twice. The
+tools here — `extract_dsdt_ratio.py` above all — expect a **carried**
+run (`ratio_weight_apply: carry`), where nothing is selected and the
+weights are still to be applied. On an accept-reject run use
+`extract_dsdt_ratio.py --no-weights`, or make the reference sample with
+a separate carry-mode run.
+
+Nothing is normalized in carry mode: any overall constant in a model
+cancels in the extracted ratio, and `D_gen` is used as a density
+(counts / bin area). Accept-reject does need a ceiling, `w_max` — see
+`ratio_weight_max` in the main README.
 
 ### The extraction
 
