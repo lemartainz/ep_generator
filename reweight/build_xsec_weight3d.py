@@ -14,8 +14,8 @@ generateOneElectron. A 3-D weight cannot: M is the invariant mass of the
 intermediate X from the first vertex (M_ppbar for
 `reaction: 2212, 9999: 9999, 2212, -2212`), and it does not exist until
 the intermediate mass has been sampled and the chain decayed. So this
-weight is a THIRD accept-reject stage in the main loop, next to the
-existing mom_weight one, using the truth 4-vector of X.
+weight is a second accept-reject stage, in the main loop, using the truth
+4-vector of X.
 
 The proposal density is NOT flat
 --------------------------------
@@ -54,10 +54,14 @@ Workflow
 Step 4 is the check that matters: it overlays the generated distribution
 on the cross section with a ratio panel, per (Q2, W) bin.
 
-Exactness
----------
-With per-bin lookup (`xsec_weight_mode: bin`, the generator default), the
-accepted density is proportional to d bin by bin BY CONSTRUCTION -- the
+Lookup mode and exactness
+-------------------------
+The generator reads the TH3D with `xsec_weight_mode: interp` by default --
+trilinear interpolation between bin centers, a continuous w(Q2, W, M) that
+is the right pairing for a cross section that is itself smooth. Set
+`xsec_weight_mode: bin` for per-bin lookup when the grid is coarse or the
+cross section genuinely is a step function: then the accepted density is
+proportional to d bin by bin BY CONSTRUCTION -- the
 weighted events match the cross section exactly, up to Poisson noise, once
 you have enough of them. Measured here on the 4x9x24 grid: rms pull 1.02
 and median |gen/xs - 1| = 2.2% over all 354 delivered cells, at 600k

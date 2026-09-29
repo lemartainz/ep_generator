@@ -1,5 +1,5 @@
 # This is the beginning of adding in an input file for the event generator class
-num_events:     100000
+num_events:     200000
 beam_energy:    10.2
 W_min:          2.85
 target_pid:     2212
@@ -25,22 +25,35 @@ mass_9999: BW 2. 0.4
 #   cd reweight && python build_xsec_weight.py --input-card ../input.txt \
 #       --formula "Gamma * exp(-2.0 * (W - 2.85))" --out ../weight_func.root
 # weight_func: weight_func.root w_Q2_Ep
-# mom_weight: mom_weight.root w_pp
 
 # 3-D cross-section weight w(Q2, W, M_X), built by
 # reweight/build_xsec_weight3d.py. M_X is the invariant mass of the
 # intermediate from the first vertex -- M_ppbar for the reaction above.
-# Applied as a THIRD accept-reject, after the decay chain, since M_X does
+# Applied as a SECOND accept-reject, after the decay chain, since M_X does
 # not exist at electron-sampling time.
 #   Format:  xsec_weight: <root file> [<hist name>]   (default w_Q2_W_M)
-#            xsec_weight_mode: bin | interp           (default bin)
-# `bin` looks up the bin the event falls in -- the right pairing for a
-# BINNED cross section. `interp` trilinearly interpolates and, on a coarse
-# grid, pulls the result well away from the cross section it was built from.
+#            xsec_weight_mode: interp | bin           (default interp)
+# `interp` trilinearly interpolates between bin centers -- a continuous
+# w(Q2, W, M), the right pairing for a smooth cross section. `bin` looks up
+# the bin the event falls in: exact per bin against a BINNED target, and
+# the safer choice on a coarse grid, where interpolation blends neighbours.
 # xsec_weight: xsec_weight.root w_Q2_W_M
-# xsec_weight_mode: bin
+# xsec_weight_mode: interp
 
-# Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e). Needed to measure
-# the proposal density for build_xsec_weight3d.py (the 3-D proposal is not
-# flat), and read by reweight/plot_xsec_closure.py for the closure plots.
+# Pair-mass weights w(Q2, W, M_AB), built JOINTLY by
+# reweight/build_pair_weight.py from measured, sideband-subtracted pair-mass
+# histograms. Each line is evaluated on EVERY (pidA, pidB) pair in the final
+# state and the factors multiplied -- two for p pbar (both pairings, as the
+# POOLED data histogram is filled), one for p p -- so no proton is ever
+# picked as "the one from X". Use instead of xsec_weight, and always add
+# every line the builder prints: the surfaces were fitted together.
+#   Format:  pair_weight: <root file> <hist name> <pidA> <pidB>
+pair_weight: pair_weight.root w_pair_2212_-2212 2212 -2212
+pair_weight: pair_weight.root w_pair_2212_2212  2212  2212
+
+# Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e) plus the final-state
+# 4-vectors (nfs, fs_pid[8], fs_px/py/pz/E[8]). Needed to measure the
+# proposal density for build_xsec_weight3d.py / build_pair_weight.py (the
+# 3-D proposal is not flat), and read by reweight/plot_xsec_closure.py for
+# the closure plots.
 # truth_ntuple: gen_truth.root

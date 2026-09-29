@@ -32,7 +32,9 @@ directory so the `lund_io` / `kinematics` imports resolve.
 | `make_pseudo_xsec.py` | Pseudo 3-D &sigma;(Q&sup2;, W, M) on a bin grid &rarr; multi-page PDF + npz |
 | `import_xsec.py` | Your real &sigma;(Q&sup2;, W, M) (TH3 / CSV) &rarr; the npz the builder reads |
 | `build_xsec_weight3d.py` | 3-D &sigma;(Q&sup2;, W, M) &rarr; `xsec_weight.root` (TH3D) for the generator |
-| `plot_xsec_closure.py` | Generated vs cross section with ratio panels &rarr; closure PDF |
+| `build_pair_weight.py` | Measured pooled M(p p&#773;) + M(p p) &rarr; jointly fitted `pair_weight.root` (TH3Ds) |
+| `truth_ntuple.py` | Read the truth ntuple; pair masses from its final-state block |
+| `plot_xsec_closure.py` | Generated vs cross section (or, with `--pair`, vs a pair-mass target) with ratio panels &rarr; closure PDF |
 
 ## Example 1 — 1-D reweight in Q²
 
@@ -295,8 +297,8 @@ A 3-D cross section cannot be applied where the 2-D one is. `weight_func`
 acts at electron-sampling time, where only `Q2` and `E'` exist (`W` is
 fixed by them). `M` — the invariant mass of the intermediate `X` from the
 first vertex, i.e. `M_ppbar` — does not exist until the intermediate mass
-has been sampled and the chain decayed. So the 3-D weight is a **third
-accept-reject stage** in the main loop, next to `mom_weight`.
+has been sampled and the chain decayed. So the 3-D weight is a **second
+accept-reject stage**, in the main loop.
 
 ```
 xsec_weight: xsec_weight.root w_Q2_W_M
@@ -343,19 +345,22 @@ python plot_xsec_closure.py \
     --out    ../xsec_closure.pdf
 ```
 
-#### Per-bin lookup, not interpolation
+#### Interpolated or per-bin lookup
 
-`xsec_weight_mode` defaults to `bin`: the event takes the weight of the
-bin it lands in. That is the correct pairing for a **binned** cross
-section — the weight is a per-bin ratio `d/g`, so applying it per bin
-makes the accepted density proportional to `d` bin by bin, exactly.
+`xsec_weight_mode` defaults to `interp`: `TH3::Interpolate`, trilinear
+between bin centres, so the event sees a continuous `w(Q2, W, M)`. That is
+the right pairing for a cross section that is itself smooth — a per-bin
+step function would imprint the grid on the generated events.
 
-`interp` uses `TH3::Interpolate`, which blends neighbouring bins into each
-event's accept probability. On a coarse grid that pulls the result away
-from the cross section it was built from — measured on the 4x9x24 grid
-here, the closure went from **rms pull 1.3 to 28.6**. Use `interp` only if
-the underlying cross section really is smooth and the binning is fine
-enough that the two agree.
+`bin` makes the event take the weight of the bin it lands in. That is the
+exact pairing for a **binned** target — the weight is a per-bin ratio
+`d/g`, so applying it per bin makes the accepted density proportional to
+`d` bin by bin — and it is what to use when the grid is coarse:
+interpolation blends neighbouring bins into each event's accept
+probability, and on the 4x9x24 pseudo grid here the *per-bin* closure went
+from **rms pull 1.3 to 28.6** with `interp`. Note that the closure plot
+compares per bin, so with `interp` on a coarse grid it will report that
+blending even when the smooth cross section is being followed faithfully.
 
 (`TH3::Interpolate` has a second trap: it returns 0 outside the hull of
 the *bin centers*, so with 4 Q&sup2; bins over [1,7] it silently discards
@@ -453,7 +458,7 @@ card or the grid rather than paying for it in rejections.
 
 #### Exactness
 
-With per-bin lookup the accepted density is proportional to `d` bin by bin
+With per-bin lookup (`xsec_weight_mode: bin`) the accepted density is proportional to `d` bin by bin
 **by construction**, so the weighted events match the cross section
 exactly, up to Poisson noise, once you have enough of them. Measured on
 this grid at 600k weighted events against a 20M-event denominator:
@@ -527,6 +532,137 @@ whole `Q2 > 4.5, W > 3.74` corner of the pseudo grid is closed by the
 theta cut — it shows up as fully hatched panels on the last page of the
 closure PDF. Cross section placed there is simply not deliverable: widen
 `theta_range`, or do not bin into that corner.
+
+### Pair-mass weights: pooled M(p p&#773;) and M(p p) (`build_pair_weight.py`)
+
+`xsec_weight` reshapes `M_X`, and the generator knows `M_X` exactly. Data
+does not: `e p -> e' p p pbar` has two protons, so the measured `M(p pbar)`
+is one pairing (a guess) or both pairings **pooled**. Extracting a "true"
+`M_X` from the pooled histogram means subtracting the wrong-pairing shape
+(from simulation), and that difference goes **negative** in the tails --
+which a weight cannot be.
+
+So instead of unfolding, match what is measured. `pair_weight:` lines
+give the generator one TH3D `w(Q2, W, M_AB)` per species pair; it
+evaluates each on **every** `(A, B)` pair in the final state and
+multiplies the factors:
+
+    w_e = u(Q2, W, M(p1 pbar)) * u(Q2, W, M(p2 pbar)) * v(Q2, W, M(p1 p2))
+
+Two `u` factors is exactly how the pooled data histogram is filled; both
+observables are symmetric under `p1 <-> p2`; and the two together pin down
+the Dalitz distribution of the `p p pbar` system in each `(Q2, W)` cell.
+
+#### Fitted, not divided
+
+With one event entering the pooled histogram twice, a per-bin ratio `d/g`
+is not the weight -- the two entries share one accept probability and
+`M(p p)` is tied to both kinematically. The builder therefore **fits** the
+log-factors of every cell of every surface at once, on the generator's
+own truth sample, minimizing
+
+    chi2 = sum_s sum_cells (H_s / lambda_s - T_s)^2 / sigma^2 + prior * sum (log u)^2
+
+with `H_s` the weighted sample histogram, `T_s` the target, `lambda_s` a
+per-surface scale and `sigma` the target's error (the npz `errors`, or
+Poisson) combined with the sample's own. L-BFGS with an analytic gradient;
+~1 min for 1M events and 1400 parameters.
+
+Why a fit and not iterative proportional fitting: the two targets are
+measured with noise and are **not guaranteed to be jointly reachable** by
+a product of per-pairing factors -- near the kinematic edge they routinely
+are not, by a few sigma. Raking then diverges (one factor to infinity, its
+partner to zero, the product finite), and the max = 1 normalization is
+wrecked. A chi2 fit settles on the compromise the errors justify. The weak
+prior fixes the flat direction of the product form (`u -> c u`,
+`v -> v / c^2` leaves `w` unchanged) at "least correction".
+
+#### Zero is not "unknown"
+
+With several entries per event, a zero on ONE pairing kills the whole
+event -- including its other pairing, which the data still counts. So the
+builder keeps two things apart that the single-entry builders can merge:
+
+| cell | factor | why |
+|---|---|---|
+| target is 0 | 0 | the data says nothing lives there; rejecting is right |
+| M outside the grid | 1, fixed | the surface has nothing to say; only the event's OTHER factors weight it |
+| below `--min-gen` / `--min-rec` | 1, fixed | same: passed through, and reported as such |
+| Q2 or W outside the grid | 0 | outside the analysis domain, as for `xsec_weight` |
+
+Pass-through cells are written as unfitted (a `<name>_fitted` 0/1 mask
+sits next to each surface) and the share of the target they hold is
+printed. The M-outside factor lives in the TH3D's under/overflow bins
+along M, so the generator reads it with the same per-bin lookup. Killing
+such events instead -- the natural first attempt -- makes the live cells
+unsatisfiable (the partner of a low-M pairing is usually a high-M one past
+the grid edge) and the fit runs away.
+
+#### Workflow
+
+```bash
+# 1. unweighted run -> events_unweighted.lund
+# 2. targets: sideband-subtracted (ppbar_weights.ipynb, "pair-mass targets"
+#    cell: subtracted_Mppbar_pooled.npz, subtracted_Mpp.npz, plus the
+#    rec_* files for the reco-level iteration) or measured cross sections
+#    (ppbar_acceptance.ipynb, `save_xsec3d`: xsec3d_Mppbar_pooled.npz,
+#    xsec3d_Mpp.npz). Same npz layout either way.
+cd reweight
+python build_pair_weight.py \
+    --target 2212,-2212 ../subtracted_Mppbar_pooled.npz \
+    --target 2212,2212  ../subtracted_Mpp.npz \
+    --gen ../events_unweighted.lund --out ../pair_weight.root
+# 3. add BOTH lines it prints to input.txt (the surfaces were fitted
+#    together), rerun -> events_pair.lund
+# 4. closure, one PDF per target
+python plot_xsec_closure.py --gen ../events_pair.lund --pair 2212,-2212 \
+    --target ../subtracted_Mppbar_pooled.npz \
+    --weight ../pair_weight.root --weight-name w_pair_2212_-2212_fitted \
+    --out ../pair_closure_ppbar.pdf
+python plot_xsec_closure.py --gen ../events_pair.lund --pair 2212,2212 \
+    --target ../subtracted_Mpp.npz \
+    --weight ../pair_weight.root --weight-name w_pair_2212_2212_fitted \
+    --out ../pair_closure_pp.pdf
+```
+
+`--gen` is the run's LUND file or its `truth_ntuple:` ROOT file
+(`truth_ntuple.py` reads both into the same layout; the LUND takes ~10 s
+per million events). Both p pbar pairings and the p p mass are symmetric
+in the two protons, so the LUND's interchangeable protons are no
+limitation here -- only `xsec_weight`, which needs the truth `M_X`, must
+have the ntuple. `--pair` histograms M of every such pair -- the pooled
+histogram -- and folds the target's errors into the pulls.
+
+#### Truth-level or reco-level
+
+`--target PIDS D.npz` drives the accepted **truth** distribution onto `D`.
+`--target PIDS D.npz R.npz` is the reco-level form used by
+`build_weight_func.py`: `R` is the reconstructed sim of the same run as
+`--gen`, on `D`'s grid, and the truth distribution is driven onto
+`(D / R) x (its own histogram)` -- the per-cell data / sim correction,
+applied at truth level. Iterate with `--prev` (previous cumulative
+`pair_weight.root`, same names and grids; `--gen` then the run that used
+it) until `D / R -> 1`.
+
+#### What was verified
+
+Pseudo-data: one generator sample reweighted by a known function of the
+Dalitz plane (`exp(-1.5 (M_X - 2)) (1 + 0.6 cos 4 M_pp) exp(-0.3 (Q2 - 2))`
+-- deliberately NOT of product form, and asymmetric in the pairings),
+Poisson-fluctuated, on the analysis grid (10 Q2 x 10 W x 20 M). Fit on an
+independent 1M-event sample, weighted run of 150k events:
+
+```
+[closure] p pbar: over 805 populated cells: rms pull = 0.46, median |gen/target - 1| = 0.066
+[closure] p p:    over 561 populated cells: rms pull = 0.48, median |gen/target - 1| = 0.091
+```
+
+Pull below 1 because the per-cell parameters follow the target's own
+fluctuations, as a per-bin ratio would. The keep fraction the builder
+predicts (`[eff]`) matched the generator's to 2%.
+
+`pair_weight` replaces `xsec_weight`; do not run both, they each reshape
+the `(Q2, W)` marginal and `EventWeighter` warns if you try.
 
 ### How this relates to `build_weight_func.py`
 

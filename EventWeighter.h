@@ -11,9 +11,14 @@
 // and handed over as ROOT histograms through the input card:
 //
 //   weight_func:       <root file> [<hist>]   TH2D w(Q2, E')        default w_Q2_Ep
-//   mom_weight:        <root file> [<hist>]   TH2D w(p_lead, p_sub) default w_pp
 //   xsec_weight:       <root file> [<hist>]   TH3D w(Q2, W, M_X)    default w_Q2_W_M
-//   xsec_weight_mode:  bin | interp           (default bin)
+//   xsec_weight_mode:  interp | bin           (default interp)
+//   pair_weight:       <root file> <hist> <pidA> <pidB>
+//                                             TH3D w(Q2, W, M_AB), one per
+//                                             species pair, repeatable
+//   pair_weight_mode:  interp | bin           (default interp; must match
+//                                             what build_pair_weight.py
+//                                             was run with)
 //
 // Each is normalized so that max(w) = 1 and the event is kept with
 // probability w. To add a new weight: give WeightConfig a file/name pair
@@ -54,13 +59,6 @@ struct WeightConfig {
     // sampling.
     std::string weight_func_file;
     std::string weight_func_name = "w_Q2_Ep";
-    // Continuous momentum weight w(p_lead, p_sub) = data / gen over the
-    // leading / sub-leading proton (2212 only) momentum magnitudes, built
-    // by build_weight_func.py --mode pmom. Applied AFTER the full event is
-    // built, since the proton momenta only exist once the decay chain is
-    // done.
-    std::string mom_weight_file;
-    std::string mom_weight_name = "w_pp";
     // 3-D cross-section weight w(Q2, W, M_X) built by
     // build_xsec_weight3d.py. M_X is the invariant mass of the intermediate
     // X from the FIRST vertex (for `reaction: 2212, 9999: 9999, 2212, -2212`
@@ -68,18 +66,41 @@ struct WeightConfig {
     // not exist until the intermediate mass has been sampled.
     std::string xsec_weight_file;
     std::string xsec_weight_name = "w_Q2_W_M";
-    // How to read the 3-D weight: "bin" (default) looks up the bin the
-    // event falls in; "interp" trilinearly interpolates between bin
-    // centers. "bin" is the correct pairing for a BINNED cross section:
-    // the weight is a per-bin ratio d/g, so applying it per bin makes the
-    // accepted density exactly proportional to d in every bin.
-    // Interpolating blends neighbouring bins into each event's accept
-    // probability, which on a coarse grid pulls the result away from the
-    // cross section it was built from -- measurably so: on a 4x9x24 grid
-    // it costs ~25% per bin. Use "interp" only when the underlying cross
-    // section really is smooth and the binning is fine enough that the
-    // two agree.
-    bool xsec_weight_interp = false;
+    // How to read the 3-D weight: "interp" (default) trilinearly
+    // interpolates between bin centers, giving a continuous w(Q2, W, M) --
+    // the right choice for a cross section that is itself smooth, where a
+    // per-bin step function would imprint the grid on the events. "bin"
+    // looks up the bin the event falls in; it is the exact pairing for a
+    // weight that is a per-bin ratio d/g against a BINNED target (the
+    // accepted density is then proportional to d bin by bin), and is what
+    // to use when the grid is coarse: interpolation blends neighbouring
+    // bins into each event's accept probability, which on a 4x9x24 grid
+    // moved the per-bin closure by ~25%.
+    bool xsec_weight_interp = true;
+    // Pair-mass weights w(Q2, W, M_AB), one TH3D per (pidA, pidB) species
+    // pair, built jointly by build_pair_weight.py. Unlike xsec_weight, which
+    // needs the TRUTH pairing (M_X), these are evaluated on EVERY (A, B)
+    // pair in the final state and multiplied together: with two protons and
+    // one antiproton, `2212 -2212` contributes two factors -- M(p1 pbar) and
+    // M(p2 pbar) -- and `2212 2212` one. That is exactly how a POOLED data
+    // histogram is filled, so the target can be the measured pooled M(p pbar)
+    // and M(p p) distributions, both symmetric under p1 <-> p2, instead of a
+    // "true" M_X that would have to be unfolded from them (and can go
+    // negative). All pair surfaces go into ONE accept-reject.
+    struct PairWeight {
+        std::string file;
+        std::string name;
+        int pidA = 0;
+        int pidB = 0;
+    };
+    std::vector<PairWeight> pair_weights;
+    // How the pair surfaces are read. They are FITTED, with the lookup as
+    // part of the model, so this must be the mode build_pair_weight.py was
+    // run with (its --mode, default interp): a surface fitted per bin and
+    // read interpolated -- or the reverse -- no longer reproduces its
+    // target. interp gives a continuous w(Q2, W, M); bin imprints the grid
+    // on the events as steps in Q2 and W.
+    bool pair_weight_interp = true;
 
     // Consume one `key: value(s)` line of the input card (key already
     // stripped of its trailing colon). Returns true if the key belongs to
@@ -88,16 +109,44 @@ struct WeightConfig {
     bool parseKey(const std::string &key, std::istringstream &iss) {
         if (key == "weight_func") {
             readFileAndName(iss, weight_func_file, weight_func_name);
-        } else if (key == "mom_weight") {
-            readFileAndName(iss, mom_weight_file, mom_weight_name);
         } else if (key == "xsec_weight") {
             readFileAndName(iss, xsec_weight_file, xsec_weight_name);
         } else if (key == "xsec_weight_mode") {
             std::string val; iss >> val;
-            xsec_weight_interp = (val == "interp");
+            xsec_weight_interp = (val != "bin");
             if (val != "interp" && val != "bin") {
                 std::cerr << "WARNING: unrecognized xsec_weight_mode '" << val
-                          << "'; using bin." << std::endl;
+                          << "'; using interp." << std::endl;
+            }
+        } else if (key == "pair_weight_mode") {
+            std::string val; iss >> val;
+            pair_weight_interp = (val != "bin");
+            if (val != "interp" && val != "bin") {
+                std::cerr << "WARNING: unrecognized pair_weight_mode '" << val
+                          << "'; using interp." << std::endl;
+            }
+        } else if (key == "pair_weight") {
+            // pair_weight: file.root hist_name pidA pidB  (all four required:
+            // several surfaces can live in one file, so the name is not
+            // defaulted)
+            PairWeight pw;
+            if (!(iss >> pw.file >> pw.name >> pw.pidA >> pw.pidB)) {
+                std::cerr << "WARNING: pair_weight needs '<file> <hist> "
+                          << "<pidA> <pidB>'; line ignored." << std::endl;
+            } else {
+                // A repeated line would apply the surface twice -- w^2 per
+                // event, and a keep fraction that collapses quadratically.
+                bool dup = false;
+                for (const auto &q : pair_weights) {
+                    if (q.pidA == pw.pidA && q.pidB == pw.pidB) dup = true;
+                }
+                if (dup) {
+                    std::cerr << "WARNING: pair_weight for (" << pw.pidA << ", "
+                              << pw.pidB << ") given more than once; keeping "
+                              << "the first line only." << std::endl;
+                } else {
+                    pair_weights.push_back(pw);
+                }
             }
         } else {
             return false;
@@ -163,12 +212,6 @@ public:
                       << cfg_.weight_func_file << ":" << cfg_.weight_func_name
                       << "  (bilinear Interpolate on Q2, E')" << std::endl;
         }
-        if (!cfg_.mom_weight_file.empty() &&
-            pp_.open(cfg_.mom_weight_file, cfg_.mom_weight_name, "mom_weight")) {
-            std::cout << "Momentum weight function enabled: "
-                      << cfg_.mom_weight_file << ":" << cfg_.mom_weight_name
-                      << "  (bilinear Interpolate on p_lead, p_sub)" << std::endl;
-        }
         if (!cfg_.xsec_weight_file.empty() &&
             xsec_.open(cfg_.xsec_weight_file, cfg_.xsec_weight_name, "xsec_weight")) {
             std::cout << "Cross-section weight enabled: "
@@ -177,18 +220,49 @@ public:
                                                            : "per-bin lookup")
                       << " on Q2, W, M_X)" << std::endl;
         }
+        // The pair surfaces are fitted JOINTLY (build_pair_weight.py rakes
+        // them against each other on one sample), so applying a subset is
+        // not "partially weighted", it is wrong. One failure drops them all.
+        bool pairs_ok = true;
+        for (const auto &pw : cfg_.pair_weights) {
+            PairSurface ps;
+            ps.pidA = pw.pidA;
+            ps.pidB = pw.pidB;
+            if (!ps.open(pw.file, pw.name, "pair_weight")) { pairs_ok = false; break; }
+            std::cout << "Pair-mass weight enabled: " << pw.file << ":" << pw.name
+                      << "  (" << (cfg_.pair_weight_interp ? "trilinear Interpolate"
+                                                           : "per-bin lookup")
+                      << " on Q2, W, M(" << pw.pidA << "," << pw.pidB
+                      << "), product over all such pairs)" << std::endl;
+            pairs_.push_back(std::move(ps));
+        }
+        if (!pairs_ok) {
+            std::cerr << "ERROR: a pair_weight surface failed to load; the "
+                      << "pair surfaces are fitted jointly, so ALL of them "
+                      << "are disabled." << std::endl;
+            for (auto &ps : pairs_) ps.close();
+            pairs_.clear();
+        }
+        if (xsec_.hist && !pairs_.empty()) {
+            std::cerr << "WARNING: xsec_weight and pair_weight are both active. "
+                      << "Both reshape the (Q2, W) marginal, so the run will "
+                      << "be corrected twice in Q2 and W." << std::endl;
+        }
 
         if (saved) saved->cd(); else gROOT->cd();
     }
 
     void close() {
         q2ep_.close();
-        pp_.close();
         xsec_.close();
+        for (auto &ps : pairs_) ps.close();
+        pairs_.clear();
     }
 
     bool hasElectronStage() const { return q2ep_.hist != nullptr; }
-    bool hasEventStage()    const { return pp_.hist != nullptr || xsec_.hist != nullptr; }
+    bool hasEventStage()    const {
+        return xsec_.hist != nullptr || !pairs_.empty();
+    }
 
     // -----------------------------------------------------------------
     // Stage 1: at electron-sampling time, before anything is decayed.
@@ -205,8 +279,8 @@ public:
     // independent accept-reject; an event has to survive all of them.
     // -----------------------------------------------------------------
     bool acceptEvent(const EventKinematics &kin, TRandom3 &rnd) {
-        if (pp_.hist   && !acceptMomentum(kin, rnd)) { ++n_reject_mom_;  return false; }
-        if (xsec_.hist && !acceptXsec(kin, rnd))     { ++n_reject_xsec_; return false; }
+        if (xsec_.hist && !acceptXsec(kin, rnd))       { ++n_reject_xsec_; return false; }
+        if (!pairs_.empty() && !acceptPairs(kin, rnd)) { ++n_reject_pair_; return false; }
         return true;
     }
 
@@ -214,15 +288,22 @@ public:
     // Diagnostics
     // -----------------------------------------------------------------
     long long nRejectElectron() const { return n_reject_electron_; }
-    long long nRejectMom()      const { return n_reject_mom_; }
     long long nRejectXsec()     const { return n_reject_xsec_; }
+    long long nRejectPair()     const { return n_reject_pair_; }
     // Post-decay rejections only: the electron stage retries inside the
     // sampler and never costs the driver an attempt.
-    long long nRejectEvent()    const { return n_reject_mom_ + n_reject_xsec_; }
+    long long nRejectEvent()    const {
+        return n_reject_xsec_ + n_reject_pair_;
+    }
 
     void printSummary(std::ostream &os = std::cout) const {
-        os << "    - momentum weight:      " << n_reject_mom_  << std::endl;
         os << "    - cross-section weight: " << n_reject_xsec_ << std::endl;
+        os << "    - pair-mass weight:     " << n_reject_pair_ << std::endl;
+        if (n_pair_over_one_ > 0) {
+            os << "  (pair-mass weight > 1 on " << n_pair_over_one_
+               << " events -- outside the builder's sample; accepted outright)"
+               << std::endl;
+        }
         if (q2ep_.hist) {
             os << "  (Q2, E') weight rejected " << n_reject_electron_
                << " electron proposals before decay" << std::endl;
@@ -270,10 +351,14 @@ private:
             return x > ax->GetXmin() && x < ax->GetXmax();
         }
         // Clamp into the hull of the bin centers, where Interpolate is
-        // defined.
+        // defined. Strictly inside at the top: TH::Interpolate treats a
+        // point AT the last center as outside the domain and returns 0,
+        // so clamping onto it would silently reject the whole outer
+        // half-bin.
         static double clampToCenters(const TAxis *ax, double x) {
-            return std::min(std::max(x, ax->GetBinCenter(1)),
-                            ax->GetBinCenter(ax->GetNbins()));
+            const double lo = ax->GetBinCenter(1);
+            const double hi = std::nextafter(ax->GetBinCenter(ax->GetNbins()), lo);
+            return std::min(std::max(x, lo), hi);
         }
     };
 
@@ -314,26 +399,40 @@ private:
         }
     };
 
+    // One pair_weight line: a 3-D surface plus the species pair it is
+    // evaluated on. Unlike the other surfaces, a pair mass OUTSIDE the M
+    // range is not a rejection: the builder stores a pass-through factor
+    // in the M under/overflow bins for every (Q2, W) column (an entry the
+    // surface knows nothing about must not veto the event, whose OTHER
+    // pairing the data still counts). Q2 or W outside the grid is still
+    // outside the analysis domain -> 0. Inside, either the bin's value or
+    // trilinear interpolation between bin centers (clamped into the hull),
+    // whichever the surface was fitted for.
+    struct PairSurface : Surface3D {
+        int pidA = 0;
+        int pidB = 0;
+
+        double lookup(double q2, double w, double m, bool interp) const {
+            const TAxis *xa = hist->GetXaxis();
+            const TAxis *ya = hist->GetYaxis();
+            const TAxis *za = hist->GetZaxis();
+            if (!inRange(xa, q2) || !inRange(ya, w)) return 0.0;
+            if (!inRange(za, m) || !interp) {
+                // FindBin returns 0 / nbins+1 outside the axis: the bins
+                // the pass-through factor lives in.
+                return hist->GetBinContent(xa->FindBin(q2), ya->FindBin(w),
+                                           za->FindBin(m));
+            }
+            return hist->Interpolate(clampToCenters(xa, q2),
+                                     clampToCenters(ya, w),
+                                     clampToCenters(za, m));
+        }
+    };
+
     // Accept-reject on a weight normalized to max 1.
     static bool keep(double w, TRandom3 &rnd) {
         if (!std::isfinite(w) || w <= 0.0) return false;
         return rnd.Uniform() <= w;
-    }
-
-    // w(p_lead, p_sub) over the two largest proton (pid == 2212,
-    // antiproton excluded) momentum magnitudes. Events without two
-    // protons are rejected.
-    bool acceptMomentum(const EventKinematics &kin, TRandom3 &rnd) const {
-        if (!kin.final_particles) return false;
-        double p_lead = -1.0, p_sub = -1.0;
-        for (const auto &pr : *kin.final_particles) {
-            if (pr.first != 2212) continue;
-            double p = pr.second.Vect().Mag();
-            if (p > p_lead)      { p_sub = p_lead; p_lead = p; }
-            else if (p > p_sub)  { p_sub = p; }
-        }
-        if (p_sub < 0.0) return false;
-        return keep(pp_.interpolate(p_lead, p_sub), rnd);
     }
 
     // w(Q2, W, M_X). Outside the histogram range the cross section says
@@ -344,14 +443,50 @@ private:
                                    cfg_.xsec_weight_interp), rnd);
     }
 
+    // Product over every pair_weight surface and, within each, over every
+    // (pidA, pidB) pair the final state offers -- each unordered pair once
+    // when A == B, each (A, B) combination once otherwise. The lookup mode
+    // is whatever the surfaces were fitted with (pair_weight_mode); the
+    // interpolation is part of the fitted model, not a smoothing applied
+    // afterwards. Since every factor is <= 1,
+    // the product is a valid accept probability as it stands. An event
+    // with no such pair at all is rejected: the surface says nothing
+    // about it.
+    bool acceptPairs(const EventKinematics &kin, TRandom3 &rnd) const {
+        if (!kin.final_particles) return false;
+        const auto &fp = *kin.final_particles;
+        double w = 1.0;
+        for (const auto &ps : pairs_) {
+            int n_pairs = 0;
+            for (size_t i = 0; i < fp.size(); ++i) {
+                if (fp[i].first != ps.pidA) continue;
+                for (size_t j = (ps.pidA == ps.pidB ? i + 1 : 0); j < fp.size(); ++j) {
+                    if (j == i || fp[j].first != ps.pidB) continue;
+                    const double m = (fp[i].second + fp[j].second).M();
+                    w *= ps.lookup(kin.Q2, kin.W, m, cfg_.pair_weight_interp);
+                    if (!(w > 0.0)) return false;
+                    ++n_pairs;
+                }
+            }
+            if (n_pairs == 0) return false;
+        }
+        // The builder normalizes to the largest factor realized on ITS
+        // sample; a product above 1 means this event sits where that
+        // sample had nothing, and is accepted outright. Counted, so it
+        // cannot pass unnoticed.
+        if (w > 1.0) ++n_pair_over_one_;
+        return keep(w, rnd);
+    }
+
     WeightConfig cfg_;
     Surface2D q2ep_;   // weight_func
-    Surface2D pp_;     // mom_weight
     Surface3D xsec_;   // xsec_weight
+    std::vector<PairSurface> pairs_;   // pair_weight (one per line)
 
     long long n_reject_electron_ = 0;
-    long long n_reject_mom_      = 0;
     long long n_reject_xsec_     = 0;
+    long long n_reject_pair_     = 0;
+    mutable long long n_pair_over_one_ = 0;
 };
 
 #endif // EVENT_WEIGHTER_H

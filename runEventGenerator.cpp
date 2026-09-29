@@ -199,17 +199,19 @@ struct ReadInput {
     // TH3::GetRandom3 instead of the uniform Q2/E/theta ranges above.
     std::string data_hist_file;
     std::string data_hist_name = "h_data";
-    // Accept-reject weight surfaces (weight_func, mom_weight, xsec_weight,
-    // xsec_weight_mode). Parsed and applied by EventWeighter.h; the
+    // Accept-reject weight surfaces (weight_func, xsec_weight,
+    // xsec_weight_mode, pair_weight). Parsed and applied by EventWeighter.h; the
     // generator only hands the sampled kinematics over.
     WeightConfig weights;
     // Optional truth ntuple: one row per ACCEPTED event holding
-    // (Q2, W, M_X, Ep, theta_e). This is the generator's own proposal
-    // density g in exactly the variables the 3-D weight uses -- it cannot
-    // be recovered from the LUND file, where the two protons are
-    // interchangeable and M_X is ambiguous. build_xsec_weight3d.py reads it
+    // (Q2, W, M_X, Ep, theta_e) plus the final-state 4-vectors. This is the
+    // generator's own proposal density g in exactly the variables the 3-D
+    // weights use -- M_X cannot be recovered from the LUND file, where the
+    // two protons are interchangeable, and the final-state block lets
+    // build_pair_weight.py form the pair masses without re-parsing a
+    // multi-GB LUND. build_xsec_weight3d.py / build_pair_weight.py read it
     // as the denominator, and plot_xsec_closure.py as the generated
-    // distribution to compare against the cross section.
+    // distribution to compare against the target.
     std::string truth_ntuple_file;
 };
 
@@ -307,7 +309,7 @@ ReadInput readInputFile(const string &filename) {
             std::string val; iss >> val;
             input.gen_plots = (val == "true" || val == "1");
         } else if (input.weights.parseKey(key, iss)) {
-            // weight_func / mom_weight / xsec_weight / xsec_weight_mode
+            // weight_func / xsec_weight / xsec_weight_mode / pair_weight
         } else if (key == "truth_ntuple") {
             // truth_ntuple: path/to/file.root
             iss >> input.truth_ntuple_file;
@@ -839,8 +841,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
                      200, 0.0, 0.0);
 
     // Leading / sub-leading final-state proton (2212) momentum magnitude.
-    // Ranked per event (p_lead >= p_sub), the same variables the mom_weight
-    // reshapes -- fill AFTER acceptance so they show the weighted output.
+    // Ranked per event (p_lead >= p_sub), as the analysis notebook ranks
+    // them -- filled AFTER acceptance so they show the weighted output.
     // Auto-binned (0,0 limits) so the range adapts to the generated momenta.
     TH1D *h_p_lead = new TH1D("h_p_lead",
                      "Leading proton |p|; p_{lead} [GeV]; Counts",
@@ -878,7 +880,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         }
     }
 
-    // Accept-reject weight surfaces (weight_func, mom_weight, xsec_weight).
+    // Accept-reject weight surfaces (weight_func, xsec_weight, pair_weight).
     // All the loading and evaluation lives in EventWeighter.h.
     EventWeighter weighter(input.weights);
     weighter.load();
@@ -926,6 +928,15 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     TFile *truth_tf = nullptr;
     TTree *truth_tree = nullptr;
     double nt_Q2 = 0, nt_W = 0, nt_M = 0, nt_Ep = 0, nt_theta = 0;
+    // Final-state block, fixed-capacity so it reads back as plain 2-D numpy
+    // arrays (uproot needs no awkward for `fs_px[8]/D`). Holds every
+    // final-state particle including the scattered electron; consumers
+    // select by fs_pid.
+    const int kMaxFS = 8;
+    int    nt_nfs = 0;
+    int    nt_fs_pid[kMaxFS];
+    double nt_fs_px[kMaxFS], nt_fs_py[kMaxFS], nt_fs_pz[kMaxFS], nt_fs_E[kMaxFS];
+    bool   warned_fs_overflow = false;
     if (!input.truth_ntuple_file.empty()) {
         truth_tf = TFile::Open(input.truth_ntuple_file.c_str(), "RECREATE");
         if (!truth_tf || truth_tf->IsZombie()) {
@@ -940,8 +951,15 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             truth_tree->Branch("M",       &nt_M,     "M/D");
             truth_tree->Branch("Ep",      &nt_Ep,    "Ep/D");
             truth_tree->Branch("theta_e", &nt_theta, "theta_e/D");
+            truth_tree->Branch("nfs",     &nt_nfs,   "nfs/I");
+            truth_tree->Branch("fs_pid",  nt_fs_pid, "fs_pid[8]/I");
+            truth_tree->Branch("fs_px",   nt_fs_px,  "fs_px[8]/D");
+            truth_tree->Branch("fs_py",   nt_fs_py,  "fs_py[8]/D");
+            truth_tree->Branch("fs_pz",   nt_fs_pz,  "fs_pz[8]/D");
+            truth_tree->Branch("fs_E",    nt_fs_E,   "fs_E[8]/D");
             cout << "Truth ntuple enabled: " << input.truth_ntuple_file
-                 << ":truth  (Q2, W, M, Ep, theta_e)" << endl;
+                 << ":truth  (Q2, W, M, Ep, theta_e + final-state "
+                 << "nfs, fs_pid[8], fs_px/py/pz/E[8])" << endl;
         }
     }
 
@@ -1018,8 +1036,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         if (!ok) { ++n_reject_finalcheck; continue; }
 
         // -------------------------------------------------------------
-        // Post-decay accept-reject (mom_weight, xsec_weight). These need
-        // the full event: the proton momenta and M_X only exist once the
+        // Post-decay accept-reject (xsec_weight, pair_weight). These need
+        // the full event: the pair masses and M_X only exist once the
         // decay chain is built. M_X is taken from the TRUTH 4-vector
         // p2_lab rather than rebuilt from the final state -- the event
         // holds two protons and picking the one that came from X is
@@ -1041,6 +1059,29 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             nt_M     = kin.M_X;
             nt_Ep    = kin.Ep;
             nt_theta = v_scattered.Theta() * TMath::RadToDeg();
+            nt_nfs = 0;
+            for (int k = 0; k < kMaxFS; ++k) {
+                nt_fs_pid[k] = 0;
+                nt_fs_px[k] = nt_fs_py[k] = nt_fs_pz[k] = nt_fs_E[k] = 0.0;
+            }
+            for (const auto &pr : final_particles) {
+                if (nt_nfs >= kMaxFS) {
+                    if (!warned_fs_overflow) {
+                        cerr << "WARNING: truth ntuple keeps only the first "
+                             << kMaxFS << " final-state particles; this "
+                             << "reaction has " << final_particles.size()
+                             << "." << endl;
+                        warned_fs_overflow = true;
+                    }
+                    break;
+                }
+                nt_fs_pid[nt_nfs] = pr.first;
+                nt_fs_px[nt_nfs]  = pr.second.Px();
+                nt_fs_py[nt_nfs]  = pr.second.Py();
+                nt_fs_pz[nt_nfs]  = pr.second.Pz();
+                nt_fs_E[nt_nfs]   = pr.second.E();
+                ++nt_nfs;
+            }
             truth_tree->Fill();
         }
 
@@ -1077,8 +1118,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         }
 
         // Diagnostic: leading / sub-leading proton |p| of the accepted event.
-        // Same ranking (p_lead >= p_sub) and 2212-only selection the mom_weight
-        // uses, so these histograms show the post-weighting momentum spectra.
+        // Same ranking (p_lead >= p_sub) and 2212-only selection the analysis
+        // notebook uses, so these histograms show the post-weighting spectra.
         if (protons.size() >= 2) {
             double p_lead = -1.0, p_sub = -1.0;
             for (const auto& pv : protons) {

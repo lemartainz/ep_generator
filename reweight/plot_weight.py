@@ -11,7 +11,6 @@ generator-ready before feeding it to runEventGenerator:
 
 Usage:
     python plot_weight.py weight_func.root w_Q2_Ep
-    python plot_weight.py mom_weight.root  w_pp
 """
 
 import sys

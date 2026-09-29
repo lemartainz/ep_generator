@@ -29,8 +29,8 @@ The generator is intended for **toy Monte Carlo**, acceptance studies, and backg
 
 - **EventWeighter.h**  
   Header-only weighting class the macro `#include`s. It owns every
-  accept-reject weight surface (`weight_func`, `mom_weight`,
-  `xsec_weight`): parsing their input-card keys, loading the ROOT
+  accept-reject weight surface (`weight_func`, `xsec_weight`,
+  `pair_weight`): parsing their input-card keys, loading the ROOT
   histograms, and deciding whether to keep an event. The generator only
   hands over the sampled kinematics, so the weighting can be changed
   without touching the generation code. See [Weighting](#weighting).
@@ -104,10 +104,10 @@ Any lines beginning with # are ignored.
 | Key         | Description                                   | Type       |
 |-------------|-----------------------------------------------|------------|
 | weight_func | Weight surface `w(Q^2, E')` applied at electron-sampling time: `<root file> [<hist name>]` (name defaults to `w_Q2_Ep`) | string |
-| mom_weight  | Weight surface `w(p_lead, p_sub)` applied as a second accept-reject after the event is built | string |
-| xsec_weight | 3-D weight surface `w(Q^2, W, M_X)` applied as a third accept-reject after the decay chain: `<root file> [<hist name>]` (name defaults to `w_Q2_W_M`) | string |
-| xsec_weight_mode | How to read that TH3D: `bin` (default, per-bin lookup) or `interp` (trilinear) | string |
-| truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e)` to this ROOT file | string |
+| xsec_weight | 3-D weight surface `w(Q^2, W, M_X)` applied as a second accept-reject after the decay chain: `<root file> [<hist name>]` (name defaults to `w_Q2_W_M`) | string |
+| xsec_weight_mode | How to read that TH3D: `interp` (default, trilinear between bin centres) or `bin` (per-bin lookup) | string |
+| pair_weight | 3-D pair-mass weight `w(Q^2, W, M_AB)` evaluated on **every** `(A, B)` pair in the final state and multiplied together: `<root file> <hist name> <pidA> <pidB>`. Repeatable; all lines form one accept-reject | string |
+| truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e)` plus the final-state 4-vectors to this ROOT file | string |
 
 All of these are built by a **separate** script and simply loaded here;
 the four weighting keys are parsed and applied by `EventWeighter.h`, not
@@ -138,8 +138,8 @@ the generator's own code either. Everything weighting-related lives in
 
 - `WeightConfig` — the input-card side. `ReadInput` holds one, and the
   card parser delegates any key it does not recognise to
-  `WeightConfig::parseKey`, which owns `weight_func`, `mom_weight`,
-  `xsec_weight` and `xsec_weight_mode`.
+  `WeightConfig::parseKey`, which owns `weight_func`, `xsec_weight`,
+  `xsec_weight_mode` and `pair_weight`.
 - `EventKinematics` — what a built event looks like to the weighter:
   `Q2`, `Ep`, `W`, `M_X` (from the truth 4-vector) and a pointer to the
   final-state particle list.
@@ -222,9 +222,12 @@ be measured — hence `truth_ntuple:`, which records `M` from the truth
 4-vector (the LUND file's two protons are interchangeable, so `M` is
 ambiguous downstream). `reweight/plot_xsec_closure.py` then overlays the
 generated distribution on the cross section with a ratio panel per bin.
-With per-bin lookup the weighted events match the cross section **exactly**
-(up to Poisson noise) — measured at rms pull 1.02 and 2.2% median
-deviation over all delivered cells. Ratio clipping would break that
+The TH3D is read with trilinear interpolation by default
+(`xsec_weight_mode: interp`), a continuous `w(Q^2, W, M)` for a smooth
+cross section; `bin` switches to per-bin lookup, which matches a binned
+cross section **exactly** (up to Poisson noise) — measured at rms pull
+1.02 and 2.2% median deviation over all delivered cells — and is the safer
+choice on a coarse grid. Ratio clipping would break that
 permanently, so it is off by default; use `--min-gen` (or
 `--target-accuracy`) instead, and run `--scan` to see what it costs.
 
@@ -232,6 +235,55 @@ See [reweight/README_reweight.md](reweight/README_reweight.md) for the
 full workflow and the traps (per-bin vs interpolated lookup, denominator
 statistics, proposal overlap, and cross section placed outside the
 acceptance).
+
+### Pair-mass weights: matching pooled distributions
+
+`xsec_weight` needs `M_X`, the mass of the intermediate — exact in the
+generator, **unobservable in data**: `e p → e' p p p̄` has two protons
+and nothing says which one came from `X`. The measured `M(p p̄)` is either
+one pairing (a guess) or both pairings **pooled**, and unfolding a "true"
+`M_X` from the pooled histogram means subtracting the wrong-pairing shape,
+which goes negative in the tails.
+
+`pair_weight:` matches the pooled distributions directly. Each line names
+a TH3D `w(Q^2, W, M_AB)` and a species pair; the generator evaluates it on
+**every** such pair in the final state and multiplies the factors — two
+for `2212 -2212` (`M(p_1 p̄)` and `M(p_2 p̄)`, exactly how the pooled
+histogram is filled), one for `2212 2212` — and keeps the event with that
+product. Both observables are symmetric under `p_1 ↔ p_2`, so no pairing
+is ever chosen, and together they pin down the three-body Dalitz
+distribution in each `(Q^2, W)` cell. The surfaces are **fitted
+jointly** (a per-bin ratio is not the answer when one event enters a
+histogram twice) by `reweight/build_pair_weight.py`, from the generator's
+truth ntuple and the notebook's sideband-subtracted pooled histograms:
+
+```bash
+# 1. unweighted run -> events_unweighted.lund (the LUND is the proposal
+#    sample; no truth ntuple needed for this stage)
+cd reweight
+python build_pair_weight.py \
+    --target 2212,-2212 ../subtracted_Mppbar_pooled.npz \
+    --target 2212,2212  ../subtracted_Mpp.npz \
+    --gen ../events_unweighted.lund --out ../pair_weight.root
+# 2. add BOTH lines it prints (the surfaces belong together) and rerun:
+#    pair_weight: pair_weight.root w_pair_2212_-2212 2212 -2212
+#    pair_weight: pair_weight.root w_pair_2212_2212  2212  2212
+# 3. closure, one PDF per target
+python plot_xsec_closure.py --gen ../events_pair.lund --pair 2212,-2212 \
+    --target ../subtracted_Mppbar_pooled.npz \
+    --weight ../pair_weight.root --weight-name w_pair_2212_-2212_fitted \
+    --out ../pair_closure_ppbar.pdf
+```
+
+`--gen` accepts either the LUND file or a `truth_ntuple:` ROOT file; the
+ntuple is smaller and faster to read, but only `xsec_weight` actually needs
+it (for the truth `M_X`).
+
+Verified end to end on a pseudo-data target (a known Dalitz-plane
+reweighting of one generator sample, Poisson-fluctuated): the weighted
+run reproduces both the pooled `M(p p̄)` and the `M(p p)` targets with rms
+pull 0.5 over ~800 and ~560 cells. Use `pair_weight` **instead of**
+`xsec_weight`, not with it — both reshape the `(Q^2, W)` marginal.
 
 Inspect a surface before running with
 `python reweight/plot_weight.py weight_func.root w_Q2_Ep`. Full details in
@@ -311,4 +363,7 @@ reaction: 2212, 1000: 1000, 211, -211
   ```
 
   (`ls /Library/Developer/CommandLineTools/SDKs/` lists the candidates.)
+- **`build_pair_weight.py` says the truth ntuple has no final-state
+  block:** the ntuple predates the `pair_weight` stage. Re-run the
+  unweighted generator with the current macro.
 

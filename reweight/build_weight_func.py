@@ -2,12 +2,8 @@
 Build a 2-D rejection-sampling weight  w(x, y) = data / gen  and save it as
 a TH2D ROOT file for the generator to consume.
 
-Two variable pairs are supported via --mode:
-  * q2ep (default): w(Q2, E'), applied at electron-sampling time.
-  * pmom          : w(p_lead, p_sub) over the leading/sub-leading
-                    proton (2212 only) momentum magnitudes, applied as a
-                    SECOND accept-reject after the full event is built.
-                    Data columns: p_p1 (leading), p_p2 (sub-leading).
+The surface is w(Q2, E'), applied at electron-sampling time (--mode q2ep,
+the only mode; the flag is kept so the MODES table can grow again).
 
 Method (pure rejection sampling, NO kernel smoothing)
 -----------------------------------------------------
@@ -47,7 +43,7 @@ explicitly keeps the weight correct even when the proposal is not uniform
 (data-hist sampling, or an already-applied upstream weight).  Pass --mc to
 supply g; omit it to fall back to an explicit uniform proposal (flat g).
 
-CSV must have columns: Q2, Ep (q2ep mode) or p_p1, p_p2 (pmom mode).
+CSV must have columns: Q2, Ep.
 
 Reco-level denominator (--rec)
 ------------------------------
@@ -115,21 +111,8 @@ All iterations MUST share identical bin edges (keep the same --data-hist /
 for iteration 0, add it (pointing at the last archived iter) for every pass
 after.
 
-Sequential reweighting (pmom mode)
-----------------------------------
-The proton momenta depend on the Q2/E' kinematics, so the pmom denominator
-g(p_lead, p_sub) must be measured from a generator run that ALREADY has the
-Q2/E' weight applied.  The one-pass workflow is therefore:
-
-    1. run generator unweighted            -> events_unweighted.lund
-    2. build q2ep weight from (1)          -> weight_func.root
-    3. run generator with weight_func only -> events_q2ep.lund
-    4. build pmom weight from (3)          -> mom_weight.root
-    5. run generator with BOTH weights
-
 Usage
 -----
-    # q2ep (default)
     python build_weight_func.py \\
         --data real_data.csv \\
         --mc   events_unweighted.lund \\
@@ -137,17 +120,6 @@ Usage
         --name w_Q2_Ep \\
         --x-range "0.5,9" \\
         --y-range "1,9" \\
-        --nx 60 --ny 60
-
-    # pmom (proton momenta); --mc is the q2ep-weighted run from step 3
-    python build_weight_func.py \\
-        --mode pmom \\
-        --data real_data.csv \\
-        --mc   events_q2ep.lund \\
-        --out  mom_weight.root \\
-        --name w_pp \\
-        --x-range "0,10" \\
-        --y-range "0,6" \\
         --nx 60 --ny 60
 """
 
@@ -162,7 +134,7 @@ from array import array as _darr
 import numpy as np
 import ROOT
 
-from kinematics import compute_kinematics_batch, proton_momenta_batch
+from kinematics import compute_kinematics_batch
 
 
 def _read_prev_surface(path, name, x_edges, y_edges):
@@ -353,12 +325,6 @@ MODES = {
         "title": "w(Q^{2},E');Q^{2} [GeV^{2}];E' [GeV]",
         "xlabel": "Q2", "ylabel": "E'",
     },
-    "pmom": {
-        "data_cols": ("p_p1", "p_p2"),
-        "default_name": "w_pp",
-        "title": "w(p_{lead},p_{sub});p_{lead} [GeV];p_{sub} [GeV]",
-        "xlabel": "p_lead", "ylabel": "p_sub",
-    },
 }
 
 
@@ -406,18 +372,15 @@ def gen_xy(mode, mc_path):
     if mode == "q2ep":
         k = compute_kinematics_batch(mc_path)
         return np.asarray(k["Q2"]), np.asarray(k["Ep"])
-    elif mode == "pmom":
-        return proton_momenta_batch(mc_path, pid=2212)
     raise SystemExit(f"unknown mode {mode!r}")
 
 
 def root_xy(mode, path, tree, cut_cols):
     """Return (x, y, cutvals) for the mode from a reconstructed ROOT TTree.
 
-    Reads the analysis branches (Q2, P_mag_e, P_mag_p1, P_mag_p2, ...) and
-    builds the same quantities that real_data.csv was made from:
-        q2ep : x = Q2,                       y = E' = sqrt(P_mag_e^2 + m_e^2)
-        pmom : x = p_lead = max(|p1|,|p2|),  y = p_sub = min(|p1|,|p2|)
+    Reads the analysis branches (Q2, P_mag_e, ...) and builds the same
+    quantities that real_data.csv was made from:
+        q2ep : x = Q2,   y = E' = sqrt(P_mag_e^2 + m_e^2)
     `cut_cols` are extra raw branch names (e.g. "W") needed for selections.
     Both the reco-sim and the real-data trees share this branch layout, so
     numerator and denominator are computed identically (reco level).
@@ -425,20 +388,14 @@ def root_xy(mode, path, tree, cut_cols):
     import uproot
     if mode == "q2ep":
         need = ["Q2", "P_mag_e"]
-    elif mode == "pmom":
-        need = ["P_mag_p1", "P_mag_p2"]
     else:
         raise SystemExit(f"unknown mode {mode!r}")
     branches = sorted(set(need) | set(cut_cols))
     t = uproot.open(path)[tree]
     a = t.arrays(branches, library="np")
 
-    if mode == "q2ep":
-        x = a["Q2"]
-        y = np.sqrt(a["P_mag_e"] ** 2 + M_E ** 2)
-    else:  # pmom
-        x = np.maximum(a["P_mag_p1"], a["P_mag_p2"])
-        y = np.minimum(a["P_mag_p1"], a["P_mag_p2"])
+    x = a["Q2"]
+    y = np.sqrt(a["P_mag_e"] ** 2 + M_E ** 2)
     cutvals = {c: a[c] for c in cut_cols}
     return x, y, cutvals
 
@@ -570,16 +527,14 @@ def build_from_data_hist(args, cfg, name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=sorted(MODES), default="q2ep",
-                    help="q2ep: w(Q2,E'); pmom: w(p_lead,p_sub) over the "
-                         "two 2212 protons. Default q2ep.")
+                    help="q2ep: w(Q2,E'). Default (and only) q2ep.")
     ap.add_argument("--data", default=None,
-                    help="CSV with the mode's columns (q2ep: Q2,Ep; "
-                         "pmom: p_p1,p_p2). Required unless --data-hist is set.")
+                    help="CSV with columns Q2,Ep. Required unless --data-hist "
+                         "is set.")
     ap.add_argument("--mc",   default=None,
-                    help="MC LUND file for the g denominator. For q2ep this "
-                         "is an UNWEIGHTED run; for pmom it is a run with the "
-                         "q2ep weight already applied (sequential one-pass). "
-                         "If omitted, a flat (uniform) proposal is assumed.")
+                    help="MC LUND file for the g denominator (an UNWEIGHTED "
+                         "run). If omitted, a flat (uniform) proposal is "
+                         "assumed.")
     ap.add_argument("--out",  required=True, help="Output ROOT file")
     ap.add_argument("--name", default=None,
                     help="TH2D name (default depends on --mode)")
