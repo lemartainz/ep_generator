@@ -41,7 +41,7 @@ mass_9999: BW 2. 0.4
 # xsec_weight_mode: bin
 
 # Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e, w_pbarp, w_pp,
-# w_ratio, w_event, t, s_pbarp, s_pp). Needed to measure the proposal density for
+# w_ratio, w_event, t, s_pbarp, s_pp, resc_class). Needed to measure the proposal density for
 # build_xsec_weight3d.py (the 3-D proposal is not flat), read by
 # reweight/plot_xsec_closure.py for the closure plots, and by
 # build_dsdt_table.py --gen to choose the (s, t) grid.
@@ -51,11 +51,21 @@ truth_ntuple: gen_truth.root
 # rescattering subsystems, so every event gets two weights,
 #   w_pbarp = sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)
 #   w_pp    = sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
-# and a FOURTH accept-reject keeps it with probability
-# (w_pbarp * w_pp) / w_max. The single sample that comes out is
-# unweighted and distributed as D_gen x w_pbarp x w_pp -- the generated
-# distribution multiplied by both weights, each factor reshaping its own
-# subsystem. One LUND file, the full reaction, as in an unweighted run.
+# An event rescatters EITHER pbar-p OR p-p, so the hypotheses add. A
+# FOURTH accept-reject keeps the event with probability
+#   ratio_weight_hypothesis: both  -> (w_pbarp + w_pp) / w_max  untagged mixture
+#   ratio_weight_hypothesis: pbarp -> w_pbarp / w_max           pbar-p class only
+#   ratio_weight_hypothesis: pp    -> w_pp / w_max              p-p class only
+# To extract dsigma/dt|s_rpbar over dsigma/dt|s_pp by counting, run once
+# with pbarp and once with pp and cat the LUND files: each half binned in
+# its own s follows its own sigma. The untagged `both` mixture cannot be
+# split back into classes.
+#
+# ratio_weight_proposals: N stops after N proposals reach this stage
+# (num_events is then ignored). With the SAME N and the SAME
+# ratio_weight_max in both runs, each file keeps its physical yield and
+# the ratio is a plain count ratio in the cat'ed file. Single-class runs
+# write their class (1 pbar-p, 2 p-p) in the LUND header's 9th column.
 #
 # Each model is a TFormula in s and t, or a TH2D table from
 # reweight/build_dsdt_table.py (prefer --log + ratio_weight_mode: log).
@@ -63,23 +73,33 @@ truth_ntuple: gen_truth.root
 # (build_dsdt_table.py --from-gen); optional, and what makes each factor
 # reproduce its sigma rather than sigma x D_gen.
 #
-# ratio_weight_max is the accept-reject ceiling on the product: any
-# number at or above max(w_pbarp * w_pp), a plain constant included. Too
+# ratio_weight_max is the accept-reject ceiling on the accepted weight:
+# any number at or above its max, a plain constant included (for the
+# formulas below: e^3 ~ 20.1 for pbarp, e^1 ~ 2.7 for pp). Too
 # high only costs efficiency. Omit it and the ceiling is scanned off the
 # tables and the D_gen grid at load time -- but a formula model with
 # neither has no grid to scan, so there it is required. Events whose
-# product exceeds the ceiling are clamped and counted in the run summary.
+# weight exceeds the ceiling are clamped and counted in the run summary.
+#
+# ratio_weight_apply: rescatter makes the rescattering real: the event is
+# kept on its class's sigma_el(s) (dsigma/dt integrated over the open t
+# range), then that pair (recoil + pbar, or recoil + produced p) is
+# scattered elastically with t drawn from dsigma/dt(s, t). The truth
+# ntuple gets t_resc = (recoil - recoil')^2 and t_obs = (target - recoil')^2.
+# Needs ratio_weight_hypothesis: pbarp | pp; far fewer proposals needed.
 #
 # ratio_weight_apply: carry turns the selection off instead: every event
 # kept, both weights carried (truth branches w_pbarp, w_pp, w_ratio,
 # w_event; optional two-column sidecar).
 ratio_weight_formula:     exp(4.0*t+3)
 ratio_weight_formula_den: exp(2.0*t+1)
-ratio_weight_max:  6.0
+ratio_weight_max:  21.0
 # ratio_weight:      dsdt_pbarp.root log_dsdt_s_t
 # ratio_weight_den:  dsdt_pp.root    log_dsdt_s_t
 # ratio_weight_mode: log
 # ratio_weight_gen:  dgen.root dgen_s_t
 ratio_weight_apply: accept
+ratio_weight_hypothesis: pbarp
+# ratio_weight_proposals: 6000000
 
 # ratio_weight_sidecar: w_resc.txt

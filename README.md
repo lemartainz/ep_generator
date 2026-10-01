@@ -111,10 +111,12 @@ Any lines beginning with # are ignored.
 | ratio_weight_den, ratio_weight_formula_den | pp rescattering model `σ_pp(s, t)`, table or formula; without one the p̄p model is used for both | string |
 | ratio_weight_gen | Generated `(s, t)` density `D_gen` from `build_dsdt_table.py --from-gen` (name defaults to `dgen_s_t`), per-bin lookup; weights are model / `D_gen`. Without it the weights are the model values | string |
 | ratio_weight_mode | Whether the model tables hold `dσ/dt` (`linear`, default) or `ln dσ/dt` (`log`, built with `--log`; recommended) | string |
-| ratio_weight_apply | `accept` (default): accept-reject on `w_pbarp · w_pp`, one unweighted sample out. `carry`: keep every event and record both weights instead | string |
-| ratio_weight_max | Accept-reject ceiling on `w_pbarp · w_pp` — any number at or above its maximum, a plain constant included. Omit to scan the tables and the `D_gen` grid at load time (a formula model with neither has no grid, so there it is required) | float |
+| ratio_weight_apply | `accept` (default): accept-reject on the weight chosen by `ratio_weight_hypothesis`, one unweighted sample out. `carry`: keep every event and record both weights instead. `rescatter`: keep the event on its class's σ_el(s) and elastically scatter that pair (see [Rescattering kinematics](#rescattering-kinematics-ratio_weight_apply-rescatter)) | string |
+| ratio_weight_hypothesis | `both` (default): accept on `w_pbarp + w_pp`, the untagged mixture. `pbarp` / `pp`: accept on that class's weight alone — a pure single-class sample, one half of the split-then-cat mixture | string |
+| ratio_weight_proposals | Stop after this many events reach the rescattering stage instead of after `num_events` kept. Same value and same `ratio_weight_max` in the p̄p and pp runs → the two files come out in physical proportion, so R is a plain count ratio | int |
+| ratio_weight_max | Accept-reject ceiling on the accepted weight — any number at or above its maximum, a plain constant included. Omit to scan the tables and the `D_gen` grid at load time (a formula model with neither has no grid, so there it is required) | float |
 | ratio_weight_sidecar | Write the two weights per event, `w_pbarp w_pp`, one line per LUND event | string |
-| truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e, w_pbarp, w_pp, w_ratio, t, s_pbarp, s_pp)` to this ROOT file | string |
+| truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e, w_pbarp, w_pp, w_ratio, w_event, t, s_pbarp, s_pp, resc_class, t_resc, t_obs)` to this ROOT file | string |
 
 All of these are built by a **separate** script and simply loaded here;
 the weighting keys are parsed and applied by `EventWeighter.h`, not by
@@ -273,30 +275,74 @@ w_pp    = σ_pp (s_rp,  t) / D_gen(s_rp,  t)      pp rescattering
 `D_gen` is one histogram — the truth ntuple of an unweighted run binned
 in `(s, t)` — evaluated at two different points.
 
-The generator then **accept-rejects on their product**, keeping the
-event with probability `(w_pbarp · w_pp) / w_max`. What comes out is one
-unweighted `e p → e' p_recoil p p̄` sample, one LUND file, the full
-reaction exactly as in an unweighted run, distributed as
+An event rescatters **either** p̄p **or** pp, so the two hypotheses add
+(an incoherent mixture), they do not multiply. By default
+(`ratio_weight_hypothesis: both`) the generator keeps the event with
+probability `(w_pbarp + w_pp) / w_max`, one unweighted sample
+distributed as `D_gen × (w_pbarp + w_pp)`.
+
+That mixture has no per-event class, so binning it in `s_rp̄` also picks
+up pp events whose `s_rp̄` lands in the bin: it cannot be used to count
+out the ratio. For the extraction, **generate each class on its own and
+cat**:
 
 ```
-D_gen × w_pbarp × w_pp
+ratio_weight_hypothesis: pbarp   # keep with w_pbarp / w_max  ->  D_gen × w_pbarp
+ratio_weight_hypothesis: pp      # keep with w_pp    / w_max  ->  D_gen × w_pp
 ```
 
-— the generated distribution multiplied by both weights, each factor
-reshaping its own subsystem. Nothing downstream has to apply a weight.
+Each run is a pure single-class sample: binned in its **own** s it
+follows its own `σ(s, t)` (× `D_gen` if `ratio_weight_gen` is not
+given). `cat events_pbarp.lund events_pp.lund > events_rescattering.lund`
+is the physical mixture. The class is written to the LUND header's
+process-ID column (9th field: 1 p̄p, 2 pp; single-class runs only), so
+the label survives `cat` and GEMC; the truth ntuple's `resc_class` keeps
+it through `hadd`.
+
+**Ratio from the counts alone.** Give both cards the same
+`ratio_weight_proposals: N` and the same `ratio_weight_max`. Each run
+then stops after N proposals and keeps `N ⟨w_class⟩ / w_max` events —
+its physical yield — so in the cat'ed file
+
+```
+R(s, t) = N(class 1, t | s_rp̄ ∈ bin) / N(class 2, t | s_pp ∈ bin)
+```
+
+with no weights and no normalization factors. Closure (6M proposals per
+class, `w_max = 21`, 37910 p̄p and 20937 pp events, read back from the
+cat'ed LUND file — recoil = first 2212, t = (target − recoil)²): pull
+mean +0.2, rms 0.7 over 4 s × 6 t bins. Without `ratio_weight_proposals`
+each run stops at `num_events` and the halves must be rescaled by
+`⟨w⟩ / N_kept` from the run summaries.
+
+With independently sized runs, the extraction at the same `t = t_X` and
+the same s bin is:
+
+```
+R(s, t) = [N_p̄p(t | s_rp̄ ∈ bin) · ⟨w_pbarp⟩/N_kept,p̄p]
+          / [N_pp(t | s_pp ∈ bin) · ⟨w_pp⟩/N_kept,pp]      =  σ_p̄p(s, t) / σ_pp(s, t)
+```
+
+Closure (`σ_p̄p = e^{4t+3}`, `σ_pp = e^{2t+1}`, no `D_gen`, 40k events
+per class, 4 s bins × 6 t bins over −1.5 < t < 0): R over the input,
+bin-averaged over each class's own events, has pull mean −0.2, rms 1.2.
+The p̄p run alone fits a t slope of 3.98 ± 0.04. Without `D_gen`,
+compare against the input averaged over the events in each bin, not at
+the bin centre: near `t_min(s)` the generated density is far from flat
+and the two slopes weight it differently.
 
 `w_max` comes from `ratio_weight_max:`, any number at or above the
-product's maximum (a plain constant is fine; too high only costs
+accepted weight's maximum (a plain constant is fine; too high only costs
 efficiency). Omit it and it is scanned off the model tables and the
 `D_gen` grid when they load — a formula model with neither has no grid
 to scan, so there the key is required and the stage refuses to run
-without it. Events whose product exceeds the ceiling are clamped to
+without it. Events whose weight exceeds the ceiling are clamped to
 accept and counted, so a ceiling set too low shows up in the run summary
 rather than silently flattening the sample:
 
 ```
-  rescattering weights (accept-reject on w_pbarp * w_pp): 4107048 events weighted, ...
-    - ceiling w_max on w_pbarp * w_pp: 2  (ratio_weight_max)
+  rescattering weights (accept-reject on w_pbarp + w_pp): 4107048 events weighted, ...
+    - ceiling w_max on accepted weight: 2  (ratio_weight_max)
     - kept:                            40000
     - rejected:                        4067048
 ```
@@ -311,7 +357,8 @@ Card:
 ```
 ratio_weight_formula:      exp(2.0*t)*(1.0+0.1*s)   # sigma_pbarp(s, t)
 ratio_weight_formula_den:  exp(1.0*t)               # sigma_pp(s, t)
-ratio_weight_max:          2.0                      # ceiling on the product
+ratio_weight_max:          2.0                      # ceiling on the accepted weight
+ratio_weight_hypothesis:   pbarp                    # or pp; both = untagged mixture
 ratio_weight_gen:          dgen.root dgen_s_t       # optional D_gen
 ```
 
@@ -333,7 +380,7 @@ wider than the `(s, t)` the run populates.
 
 `ratio_weight_apply: carry` turns the selection off: every event is
 kept, nothing is normalized, and the weights ride along as truth-ntuple
-branches `w_pbarp`, `w_pp`, their ratio `w_ratio` and their product
+branches `w_pbarp`, `w_pp`, their ratio `w_ratio` and their applied sum
 `w_event` — plus, with `ratio_weight_sidecar:`, two columns per LUND
 event. This is the mode for measuring a ratio out of a *single* sample,
 and for the reference histogram a closure check compares the accepted
@@ -379,6 +426,50 @@ python extract_dsdt_ratio.py gen_truth_weighted.root \
 Because `s_rp̄`, `s_rp` and `t` are in the truth ntuple, both weights can
 always be recomputed offline in either mode; `plot_ratio_weight.py`
 shows the per-event ratio `w_pbarp / w_pp` against `t`.
+
+#### Rescattering kinematics (`ratio_weight_apply: rescatter`)
+
+The accept-reject modes above only *select* generated events: no
+four-vector changes, every kept event is a symmetric `X → p p̄` decay, and
+the two classes differ in nothing but their `(s, t)` population.
+`rescatter` makes the final-state rescattering real. With
+`ratio_weight_hypothesis: pbarp` the pair is recoil + p̄, with `pp` it is
+recoil + produced p (one class per run, then `cat`, as before):
+
+1. The event is kept with probability `σ_el(s) / w_max`, where
+   `σ_el(s) = ∫ dσ/dt dt` over the t range open at the pair's `s`,
+   `−(s − 4m²) ≤ t ≤ 0` (tabulated at load up to the largest pair `s` the
+   beam energy allows).
+2. A kept pair is scattered elastically. In its rest frame the relative
+   momentum `k*` (`k*² = s/4 − m²`) keeps its length and turns by
+   `cos θ* = 1 + t / (2k*²)`, with `t` drawn from `dσ/dt(s, t)` at that `s`
+   and a uniform azimuth; both momenta are boosted back. `s`, the pair's
+   total momentum and the masses are unchanged, the spectator is not
+   touched, and the LUND file gets the rescattered momenta.
+
+Each class then populates `(s, t_resc)` as production density × `dσ/dt`.
+Three t's are recorded in the truth ntuple: `t` (production,
+`(q − X)²` at the first vertex), `t_resc = (recoil − recoil′)²` (the
+rescattering's own) and `t_obs = (target − recoil′)² = (q − X′)²` (what the
+LUND file gives; the two forms are equal by conservation, so data cannot
+recover the production `t`). `ratio_weight_gen` is ignored. The ceiling is
+scanned off the `σ_el(s)` tables — the larger class's maximum when
+`ratio_weight_proposals` is set, so both runs share it and the yields stay
+physical — or given as `ratio_weight_max` (a ceiling sized for `dσ/dt` at
+`t = 0` is valid but wasteful here). Acceptance is high (the weight no
+longer falls with t), so far fewer proposals are needed than in `accept`
+mode: 300k proposals kept 204,626 p̄p and 40,452 pp events for the models
+below.
+
+Validated with `σ_p̄p = e³ exp[(4 − ln(s/3.52)) t]`,
+`σ_pp = e¹ exp[(2 + 0.5 ln(s/3.52)) t]`: four-momentum conserved and masses
+unchanged to LUND precision; the fitted `t_resc` slope follows `B(s)` in
+every s bin (3.62, 3.31, 3.10, 2.87 vs 3.61, 3.34, 3.09, 2.91); and with
+labels, counts binned in `(s, t_resc)` close on the input ratio,
+χ²/ndf = 33.4/37. Binned in `t_obs` instead, the ratio is flat in t at
+`σ_el^p̄p(s) / σ_el^pp(s)`: with production flat in t (`t_slope: 0`,
+⟨t⟩ ≈ −4 GeV²) against ⟨t_resc⟩ ≈ −0.26 GeV², `t_obs` is essentially the
+production t (correlation 0.87 with it, 0.03 with `t_resc`).
 
 ## Example usage
 

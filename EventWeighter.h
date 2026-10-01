@@ -29,8 +29,8 @@
 //
 //   weighter.acceptRescattering(kin, rnd)  -- once the decay chain exists
 //
-// The event is kept with probability (w_pbarp + w_pp) / w_max, so the
-// single ep -> e'p p pbar sample that comes out is unweighted and
+// By default the event is kept with probability (w_pbarp + w_pp) / w_max,
+// so the single ep -> e'p p pbar sample that comes out is unweighted and
 // distributed as
 //
 //   D_gen x (w_pbarp + w_pp),
@@ -40,6 +40,25 @@
 // therefore falls with the shallower of the two slopes, not with their
 // sum. There is one output file, with the reaction's full final state,
 // exactly as in an unweighted run.
+//
+// That mixture carries no per-event class, so binning it in s_rpbar
+// picks up p-p events too (and vice versa): it is NOT the sample to
+// extract the ratio from by counting. `ratio_weight_hypothesis: pbarp`
+// (or `pp`) accept-rejects on that one term alone, w_pbarp / w_max (or
+// w_pp / w_max), so the run is a pure single-class sample distributed
+// as D_gen x w_pbarp -- binned in its own s it follows sigma_pbarp(s, t)
+// and nothing else. Run once per class and cat the two LUND files for
+// the physical mixture; each file (and its truth ntuple, branch
+// resc_class) keeps the class label.
+//
+// For the ratio to come out of the COUNTS alone, the two halves must be
+// in their physical proportion. `ratio_weight_proposals: N` stops the run
+// after N events have reached this stage (instead of after num_events
+// kept), so a class keeps N <w_class> / w_max events -- proportional to
+// its generated cross section -- provided both runs share N and w_max.
+// A scanned ceiling in that mode is 1.05 max(max w_pbarp, max w_pp), the
+// same for either class, so two cards differing only in the hypothesis
+// agree on it; an explicit ratio_weight_max must simply be equal in both.
 //
 // D_gen(s, t) is the generator's own (s, t) density (optional; 1 when
 // absent). Each factor divides by it at its own s, which is what makes
@@ -57,6 +76,22 @@
 // ceiling is clamped to accept and counted, so a ceiling set too low
 // shows up in the run summary instead of silently biasing the sample.
 //
+// `ratio_weight_apply: rescatter` makes the rescattering real instead of
+// a selection. The pair of the class the run selects -- recoil + pbar
+// (pbarp) or recoil + produced p (pp) -- is kept with probability
+// sigma_el(s) / w_max, where sigma_el(s) is its dsigma/dt integrated over
+// the t range open at the pair's s, and a kept pair is then scattered
+// elastically: in the pair's rest frame its relative momentum is rotated
+// by the angle a t drawn from dsigma/dt(s, t) fixes,
+//   t = -2 k*^2 (1 - cos theta*),   k*^2 = s/4 - m_p^2,   -(s - 4 m_p^2) <= t <= 0,
+// with a uniform azimuth, and both momenta are boosted back. s, the pair's
+// total momentum and the masses are unchanged; the spectator is not
+// touched. Each class therefore populates (s, t_resc) as production
+// density x dsigma/dt, with t_resc = (recoil - recoil')^2 the
+// rescattering's own momentum transfer; the observed
+// (target - recoil')^2 == (q - X')^2 is moved by it. rescatter() needs
+// ratio_weight_hypothesis: pbarp | pp and ignores ratio_weight_gen.
+//
 // `ratio_weight_apply: carry` keeps the older behaviour instead: no
 // selection, every event kept, and the two weights carried with it
 // (truth-ntuple branches, and a sidecar file next to the LUND). Nothing
@@ -71,10 +106,17 @@
 //   ratio_weight_mode:         linear | log          tables hold dsigma/dt or ln(dsigma/dt)
 //   ratio_weight_gen:          <root file> [<hist>]  TH2D D_gen(s, t)    default dgen_s_t,
 //                                                    per-bin lookup (build_dsdt_table.py --from-gen)
-//   ratio_weight_apply:        accept | carry        accept-reject on w_pbarp + w_pp (default),
-//                                                    or keep every event and carry both weights
-//   ratio_weight_max:          <number>              ceiling on the product; omit to scan
-//                                                    the grids at load time
+//   ratio_weight_apply:        accept | carry | rescatter
+//                                                    accept-reject on w_pbarp + w_pp (default),
+//                                                    keep every event and carry both weights, or
+//                                                    accept on sigma_el(s) and scatter the pair
+//   ratio_weight_hypothesis:   both | pbarp | pp     which term(s) the accept-reject uses:
+//                                                    w_pbarp + w_pp (default), or one class
+//   ratio_weight_proposals:    <N>                   stop after N proposals reach this stage, not
+//                                                    num_events kept: same N and w_max per class
+//                                                    -> the two halves in physical proportion
+//   ratio_weight_max:          <number>              ceiling on the accepted weight; omit to
+//                                                    scan the grids at load time
 //
 // To add a new weight: give WeightConfig a file/name pair and a parseKey
 // branch, load it in EventWeighter::load(), and evaluate it in
@@ -95,6 +137,7 @@
 #include <TRandom3.h>
 #include <TLorentzVector.h>
 #include <TFormula.h>
+#include <TMath.h>
 
 #include <algorithm>
 #include <array>
@@ -171,8 +214,27 @@ struct WeightConfig {
     // How the two rescattering weights are applied. "accept" (default):
     // their sum drives an accept-reject and the run produces one
     // unweighted sample. "carry": no selection, every event kept with
-    // both weights recorded.
+    // both weights recorded. "rescatter": see ratio_rescatter below.
     bool ratio_weight_accept = true;
+    // "rescatter": accept on the selected class's sigma_el(s), then scatter
+    // its pair elastically (see the header comment). An accept-reject too,
+    // so ratio_weight_accept stays true.
+    bool ratio_rescatter = false;
+    // Largest pair s the reaction can reach, set by the generator from the
+    // beam energy before load(): the sigma_el(s) table spans
+    // [4 m_p^2, rescatter_s_max]. <= 0: 30 GeV^2.
+    double rescatter_s_max = 0.0;
+    // Which rescattering class the accept-reject selects: 0 = both
+    // (w_pbarp + w_pp, the untagged mixture), 1 = pbar-p only (w_pbarp),
+    // 2 = p-p only (w_pp). A single-class run is one half of the
+    // split-then-cat mixture and can be binned in its own s by counting.
+    int ratio_weight_hypothesis = 0;
+    // > 0: the run ends once this many events have been weighted by the
+    // rescattering stage, however many are kept. With the same value and
+    // the same ceiling in the pbar-p and p-p runs, the kept counts are in
+    // the ratio of the two generated cross sections, so the cat'ed file
+    // is the physical mixture and R comes out of plain counts.
+    long long ratio_weight_proposals = 0;
     // Accept-reject ceiling, the w_max in (w_pbarp + w_pp) / w_max. <= 0
     // means "work it out at load time by scanning the model tables and
     // the D_gen grid". Any number at or above the true maximum is valid:
@@ -217,12 +279,31 @@ struct WeightConfig {
         } else if (key == "ratio_weight_apply") {
             std::string val; iss >> val;
             ratio_weight_accept = (val != "carry");
-            if (val != "accept" && val != "carry") {
+            ratio_rescatter     = (val == "rescatter");
+            if (val != "accept" && val != "carry" && val != "rescatter") {
                 std::cerr << "WARNING: unrecognized ratio_weight_apply '" << val
                           << "'; using accept." << std::endl;
             }
+        } else if (key == "ratio_weight_hypothesis") {
+            std::string val; iss >> val;
+            if      (val == "both")  ratio_weight_hypothesis = 0;
+            else if (val == "pbarp") ratio_weight_hypothesis = 1;
+            else if (val == "pp")    ratio_weight_hypothesis = 2;
+            else {
+                std::cerr << "WARNING: unrecognized ratio_weight_hypothesis '" << val
+                          << "' (both | pbarp | pp); using both." << std::endl;
+                ratio_weight_hypothesis = 0;
+            }
+        } else if (key == "ratio_weight_proposals") {
+            long long v = 0;
+            if (iss >> v && v > 0) {
+                ratio_weight_proposals = v;
+            } else {
+                std::cerr << "WARNING: ratio_weight_proposals needs a positive "
+                             "integer; ignored." << std::endl;
+            }
         } else if (key == "ratio_weight_max") {
-            // ratio_weight_max: <w_max>   ceiling on w_pbarp + w_pp
+            // ratio_weight_max: <w_max>   ceiling on the accepted weight
             double v = 0.0;
             if (iss >> v) {
                 ratio_weight_max = v;
@@ -371,7 +452,7 @@ public:
                          "without a numerator (ratio_weight / ratio_weight_formula); "
                          "ignored." << std::endl;
         }
-        if (hasRatioStage() && !cfg_.ratio_weight_gen_file.empty()) {
+        if (hasRatioStage() && !cfg_.ratio_rescatter && !cfg_.ratio_weight_gen_file.empty()) {
             if (gen_.open(cfg_.ratio_weight_gen_file, cfg_.ratio_weight_gen_name,
                           "ratio_weight_gen")) {
                 std::cout << "  generated density D_gen(s, t): "
@@ -379,18 +460,25 @@ public:
                           << cfg_.ratio_weight_gen_name
                           << "  (per-bin lookup; weights = model / D_gen)" << std::endl;
             }
-        } else if (hasRatioStage()) {
+        } else if (hasRatioStage() && !cfg_.ratio_rescatter) {
             std::cout << "  no ratio_weight_gen: weights are the model values themselves"
                       << std::endl;
         }
         // Accept-reject needs its ceiling before the first event. Without
         // one the stage cannot run, so shut it down loudly rather than
         // quietly fall back to something the user did not ask for.
-        if (hasRatioStage() && cfg_.ratio_weight_accept && !computeCeiling()) {
+        if (hasRatioStage() && cfg_.ratio_rescatter) {
+            if (!prepareRescatter()) {
+                ratio_.close();
+                ratio_den_.close();
+                formula_.reset();
+                formula_den_.reset();
+            }
+        } else if (hasRatioStage() && cfg_.ratio_weight_accept && !computeCeiling()) {
             std::cerr << "ERROR: rescattering accept-reject needs a ceiling w_max "
                          "and there is no (s, t) grid to scan for one (formula "
                          "model, no ratio_weight_gen). Give `ratio_weight_max: "
-                         "<number>` -- any value at or above max(w_pbarp + w_pp) "
+                         "<number>` -- any value at or above the accepted weight's max "
                          "-- or switch to `ratio_weight_apply: carry`. "
                          "Rescattering stage disabled." << std::endl;
             ratio_.close();
@@ -422,6 +510,15 @@ public:
         return hasRatioStage() && cfg_.ratio_weight_accept;
     }
     double ratioMax() const { return w_max_; }
+    // Proposal-count stopping (ratio_weight_proposals): the target, and
+    // how many events the stage has weighted so far.
+    long long ratioProposals() const {
+        return ratioIsAcceptReject() ? cfg_.ratio_weight_proposals : 0;
+    }
+    long long nRatioEval() const { return n_ratio_eval_; }
+    // ratio_weight_apply: rescatter -- the driver calls rescatter() instead
+    // of acceptRescattering().
+    bool rescatterMode() const { return hasRatioStage() && cfg_.ratio_rescatter; }
 
     // -----------------------------------------------------------------
     // Stage 1: at electron-sampling time, before anything is decayed.
@@ -483,10 +580,14 @@ public:
     struct RatioWeights {
         double w_pbarp = 1.0;   // sigma_pbarp(s_rpbar, t) / D_gen(s_rpbar, t)
         double w_pp    = 1.0;   // sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
+        int    hypo    = 0;     // WeightConfig::ratio_weight_hypothesis
         // What multiplies the generated distribution. The event has
         // EITHER pbar-p or p-p rescattering, not both, so the two
         // hypotheses add: an incoherent mixture, not a coherent product.
-        double applied() const { return w_pbarp + w_pp; }
+        // A single-class run uses its own term only.
+        double applied() const {
+            return hypo == 1 ? w_pbarp : hypo == 2 ? w_pp : w_pbarp + w_pp;
+        }
     };
 
     bool hasRatioStage() const { return ratio_.hist != nullptr || formula_.ok(); }
@@ -497,17 +598,27 @@ public:
         if (out) *out = rv;
         RatioWeights w;
         if (!hasRatioStage()) return w;
+        w.hypo = cfg_.ratio_weight_hypothesis;
         ++n_ratio_eval_;
         w.w_pbarp = w.w_pp = 0.0;
         if (!ok) { ++n_ratio_topology_; return w; }
 
         // pbar-p subsystem at s_rpbar; p-p subsystem at s_rp, with its
         // own model if one was given and the same one otherwise. Either
-        // term failing leaves BOTH at 0: the sum is what the event is
-        // weighted by, so a half-built sum is no weight at all.
-        double a, b;
-        if (!hypoWeight(true,  rv.s_pbarp, rv.t, a, /*count=*/true)) return w;
-        if (!hypoWeight(false, rv.s_pp,    rv.t, b, /*count=*/true)) return w;
+        // term the accept-reject uses failing leaves BOTH at 0: that is
+        // what the event is weighted by, so a half-built sum is no weight
+        // at all. A term the run does not select is still evaluated for
+        // the record, but its failure (0) does not cost the event.
+        const bool need_a = w.hypo != 2, need_b = w.hypo != 1;
+        double a = 0.0, b = 0.0;
+        if (!hypoWeight(true,  rv.s_pbarp, rv.t, a, /*count=*/need_a)) {
+            if (need_a) return w;
+            a = 0.0;
+        }
+        if (!hypoWeight(false, rv.s_pp,    rv.t, b, /*count=*/need_b)) {
+            if (need_b) return w;
+            b = 0.0;
+        }
         w.w_pbarp = a; w.w_pp = b;
         sum_w_pbarp_ += a; sum_w_pp_ += b;
         return w;
@@ -533,6 +644,114 @@ public:
         if (!ratioIsAcceptReject()) return a;
         a.keep = draw(a.w.applied(), w_max_, rnd, n_over_);
         if (a.keep) ++n_keep_; else ++n_reject_resc_;
+        return a;
+    }
+
+    // What one rescattering did, for the truth ntuple.
+    struct RescatterInfo {
+        int    cls      = 0;    // 1 pbar-p (recoil + pbar), 2 p-p (recoil + produced p)
+        double s        = NAN;  // the pair's s -- the same before and after
+        double sigma_el = NAN;  // its sigma_el(s): the weight the event was kept with
+        double t_resc   = NAN;  // (recoil - recoil')^2: the rescattering's own t
+        double t_obs    = NAN;  // (target - recoil')^2 == (q - X')^2: what the LUND file gives
+    };
+
+    // ratio_weight_apply: rescatter. Keep the event with probability
+    // sigma_el(s)/w_max for the selected class's pair, then scatter that
+    // pair elastically IN PLACE in `fp` (the final-state list the LUND file
+    // is written from). `out` gets the invariants AFTER the rescattering
+    // (s_pbarp, s_pp) and the production t; `info` what the scattering did.
+    RatioAccept rescatter(const EventKinematics &kin,
+                          std::vector<std::pair<int, TLorentzVector>> &fp,
+                          TRandom3 &rnd, RatioVars *out = nullptr,
+                          RescatterInfo *info = nullptr) {
+        RatioAccept a;
+        a.w.hypo = cfg_.ratio_weight_hypothesis;
+        a.w.w_pbarp = a.w.w_pp = 0.0;
+        RescatterInfo ri;
+        ri.cls = a.w.hypo;
+        if (out) *out = RatioVars{};
+        ++n_ratio_eval_;
+
+        // The recoil is the proton that matches the first-vertex 4-vector;
+        // the other proton came from X. Anything but exactly two protons and
+        // one antiproton cannot be rescattered.
+        int i_rec = -1, i_pro = -1, i_pb = -1, n_p = 0, n_pb = 0;
+        double best = 1e300;
+        for (int i = 0; i < (int)fp.size(); ++i) {
+            if (fp[i].first == -2212) { i_pb = i; ++n_pb; }
+            if (fp[i].first != 2212) continue;
+            ++n_p;
+            const TLorentzVector d = fp[i].second - kin.p_recoil;
+            const double dist = d.Vect().Mag2() + d.E() * d.E();
+            if (dist < best) { best = dist; i_rec = i; }
+        }
+        for (int i = 0; i < (int)fp.size(); ++i)
+            if (fp[i].first == 2212 && i != i_rec) i_pro = i;
+        if (!kin.have_vertex || n_p != 2 || n_pb != 1 || i_rec < 0 || i_pro < 0) {
+            ++n_ratio_topology_; ++n_reject_resc_;
+            a.keep = false;
+            if (info) *info = ri;
+            return a;
+        }
+
+        const TLorentzVector rec0 = fp[i_rec].second;
+        const double s_rpb = (rec0 + fp[i_pb].second).M2();
+        const double s_rp  = (rec0 + fp[i_pro].second).M2();
+        a.w.w_pbarp = sigmaEl(true,  s_rpb);
+        a.w.w_pp    = sigmaEl(false, s_rp);
+        sum_w_pbarp_ += a.w.w_pbarp; sum_w_pp_ += a.w.w_pp;
+        const bool pbarp = (ri.cls == 1);
+        const int  i_par = pbarp ? i_pb : i_pro;       // the recoil's partner
+        ri.s        = pbarp ? s_rpb : s_rp;
+        ri.sigma_el = pbarp ? a.w.w_pbarp : a.w.w_pp;
+        if (out) {
+            out->t       = (kin.p_target - kin.p_recoil).M2();
+            out->s_pbarp = s_rpb;
+            out->s_pp    = s_rp;
+        }
+
+        a.keep = draw(ri.sigma_el, w_max_, rnd, n_over_);
+        if (!a.keep) { ++n_reject_resc_; if (info) *info = ri; return a; }
+
+        // Elastic scattering in the pair's rest frame: |k*| is kept, the
+        // direction turns by theta* with cos theta* = 1 + t / (2 k*^2).
+        const TLorentzVector A = fp[i_rec].second, B = fp[i_par].second;
+        const TVector3 beta = (A + B).BoostVector();
+        TLorentzVector a_cm = A;
+        a_cm.Boost(-beta);
+        const TVector3 k = a_cm.Vect();
+        const double k2 = k.Mag2();
+        double t = 0.0;
+        if (!(k2 > 0.0) || !sampleT(pbarp, ri.s, -4.0 * k2, rnd, t)) {
+            ++n_ratio_bad_; ++n_reject_resc_;
+            a.keep = false;
+            if (info) *info = ri;
+            return a;
+        }
+        const double cosT = std::clamp(1.0 + t / (2.0 * k2), -1.0, 1.0);
+        const double sinT = std::sqrt(std::max(0.0, 1.0 - cosT * cosT));
+        const double phi  = rnd.Uniform(0.0, TMath::TwoPi());
+        const TVector3 z = k.Unit();
+        const TVector3 x = z.Orthogonal().Unit();
+        const TVector3 y = z.Cross(x);
+        const TVector3 k_new = std::sqrt(k2) * (cosT * z + sinT * (std::cos(phi) * x + std::sin(phi) * y));
+        TLorentzVector a_new, b_new;
+        a_new.SetVectM( k_new, A.M());
+        b_new.SetVectM(-k_new, B.M());
+        a_new.Boost(beta);
+        b_new.Boost(beta);
+        fp[i_rec].second = a_new;
+        fp[i_par].second = b_new;
+
+        ri.t_resc = (A - a_new).M2();
+        ri.t_obs  = (kin.p_target - a_new).M2();
+        if (out) {
+            out->s_pbarp = (a_new + fp[i_pb].second).M2();
+            out->s_pp    = (a_new + fp[i_pro].second).M2();
+        }
+        ++n_keep_;
+        if (info) *info = ri;
         return a;
     }
 
@@ -570,13 +789,13 @@ public:
             os << "    - empty D_gen cell (w=0):          " << n_ratio_nogen_ << std::endl;
             os << "    - no unique antiproton (w=0):      " << n_ratio_topology_ << std::endl;
             if (ratioIsAcceptReject()) {
-                os << "    - ceiling w_max on w_pbarp + w_pp: " << w_max_
+                os << "    - ceiling w_max on accepted weight: " << w_max_
                    << (ceiling_scanned_ ? "  (scanned)" : "  (ratio_weight_max)")
                    << std::endl;
                 os << "    - kept:                            " << n_keep_ << std::endl;
                 os << "    - rejected:                        " << n_reject_resc_ << std::endl;
                 if (n_over_ > 0) {
-                    os << "    - WARNING: w_pbarp + w_pp > w_max, clamped to accept: "
+                    os << "    - WARNING: accepted weight > w_max, clamped to accept: "
                        << n_over_ << ". The ceiling is too low and the sample is "
                           "flattened there; raise ratio_weight_max." << std::endl;
                 }
@@ -867,7 +1086,13 @@ private:
             if (hypoWeight(false, pt.first, pt.second, v, /*count=*/false))
                 m_pp = std::max(m_pp, v);
         }
-        w_max_ = 1.05 * (m_pbarp + m_pp);
+        const int h = cfg_.ratio_weight_hypothesis;
+        if (h != 0 && cfg_.ratio_weight_proposals > 0) {
+            // Shared by both single-class runs, so their yields compare.
+            w_max_ = 1.05 * std::max(m_pbarp, m_pp);
+        } else {
+            w_max_ = 1.05 * ((h != 2 ? m_pbarp : 0.0) + (h != 1 ? m_pp : 0.0));
+        }
         ceiling_scanned_ = true;
         std::cout << "  accept-reject ceiling scanned over " << pts.size()
                   << " (s, t) grid points: max w_pbarp = " << m_pbarp
@@ -876,10 +1101,127 @@ private:
         return w_max_ > 0.0;
     }
 
+    // ---- rescatter mode ----------------------------------------------
+    static constexpr double kMp = 0.9382720813;   // p and pbar mass [GeV], = PDG::proton
+
+    // The class's dsigma/dt at (s, t), 0 where the model says nothing
+    // (outside a table) or is invalid. Same model choice as hypoWeight().
+    double model(bool pbarp, double s, double t) const {
+        const bool own_den = ratio_den_.hist != nullptr || formula_den_.ok();
+        const bool use_num = pbarp || !own_den;
+        double v = 0.0;
+        if (!dsdt(use_num ? ratio_ : ratio_den_, use_num ? formula_ : formula_den_,
+                  s, t, v, /*count=*/false)) return 0.0;
+        return (std::isfinite(v) && v > 0.0) ? v : 0.0;
+    }
+
+    // sigma_el(s): dsigma/dt integrated over -(s - 4 m_p^2) <= t <= 0, the
+    // same trapezoid sampleT() normalizes with.
+    static constexpr int kNt = 1024;
+    double sigmaElDirect(bool pbarp, double s) const {
+        const double t_lo = -(s - 4.0 * kMp * kMp);
+        if (!(t_lo < 0.0)) return 0.0;
+        const double dt = -t_lo / kNt;
+        double sum = 0.5 * (model(pbarp, s, t_lo) + model(pbarp, s, 0.0));
+        for (int i = 1; i < kNt; ++i) sum += model(pbarp, s, t_lo + i * dt);
+        return sum * dt;
+    }
+
+    // Tabulated at load (el_), linear in s; off the table, integrated directly.
+    double sigmaEl(bool pbarp, double s) const {
+        const std::vector<double> &g = pbarp ? el_pbarp_ : el_pp_;
+        if (el_ds_ > 0.0 && g.size() > 1) {
+            const double x = (s - el_s_lo_) / el_ds_;
+            if (x >= 0.0 && x <= (double)(g.size() - 1)) {
+                const int i = std::min((int)x, (int)g.size() - 2);
+                const double f = x - i;
+                return g[i] * (1.0 - f) + g[i + 1] * f;
+            }
+        }
+        return sigmaElDirect(pbarp, s);
+    }
+
+    // Draw t on [t_lo, 0] from the class's dsigma/dt at fixed s: inverse CDF
+    // on a uniform kNt-cell grid (trapezoid), linear inside a cell.
+    bool sampleT(bool pbarp, double s, double t_lo, TRandom3 &rnd, double &t) const {
+        std::array<double, kNt + 1> cdf;
+        const double dt = -t_lo / kNt;
+        double f_prev = model(pbarp, s, t_lo);
+        cdf[0] = 0.0;
+        for (int i = 1; i <= kNt; ++i) {
+            const double f = model(pbarp, s, t_lo + i * dt);
+            cdf[i] = cdf[i - 1] + 0.5 * (f_prev + f) * dt;
+            f_prev = f;
+        }
+        if (!(cdf[kNt] > 0.0) || !std::isfinite(cdf[kNt])) return false;
+        const double u = rnd.Uniform() * cdf[kNt];
+        const int j = std::clamp((int)(std::upper_bound(cdf.begin(), cdf.end(), u) - cdf.begin()), 1, kNt);
+        const double c0 = cdf[j - 1], c1 = cdf[j];
+        t = t_lo + (j - 1 + (c1 > c0 ? (u - c0) / (c1 - c0) : 0.5)) * dt;
+        return true;
+    }
+
+    // Load-time set-up for rescatter mode: checks, the sigma_el(s) tables
+    // and the ceiling. The scanned ceiling is 1.05 x the larger class's
+    // max with ratio_weight_proposals (so both single-class runs share it
+    // and their yields compare), the own class's otherwise.
+    bool prepareRescatter() {
+        const int h = cfg_.ratio_weight_hypothesis;
+        if (h != 1 && h != 2) {
+            std::cerr << "ERROR: ratio_weight_apply: rescatter needs "
+                         "ratio_weight_hypothesis: pbarp or pp (one class per run, "
+                         "then cat). Rescattering stage disabled." << std::endl;
+            return false;
+        }
+        if (!cfg_.ratio_weight_gen_file.empty()) {
+            std::cerr << "WARNING: ratio_weight_gen is ignored with ratio_weight_apply: "
+                         "rescatter -- the rescattering generates its own t." << std::endl;
+        }
+        el_s_lo_ = 4.0 * kMp * kMp;
+        const double s_hi = cfg_.rescatter_s_max > el_s_lo_ ? cfg_.rescatter_s_max : 30.0;
+        const int ns = 1000;
+        el_ds_ = (s_hi - el_s_lo_) / (ns - 1);
+        el_pbarp_.assign(ns, 0.0); el_pp_.assign(ns, 0.0);
+        double m_pbarp = 0.0, m_pp = 0.0;
+        for (int i = 0; i < ns; ++i) {
+            const double s = el_s_lo_ + i * el_ds_;
+            el_pbarp_[i] = sigmaElDirect(true,  s);
+            el_pp_[i]    = sigmaElDirect(false, s);
+            m_pbarp = std::max(m_pbarp, el_pbarp_[i]);
+            m_pp    = std::max(m_pp,    el_pp_[i]);
+        }
+        std::cout << "  rescattering kinematics: sigma_el(s) tabulated on " << ns
+                  << " points, " << el_s_lo_ << " < s < " << s_hi << " GeV^2: max sigma_el "
+                  << "pbar-p = " << m_pbarp << ", p-p = " << m_pp << std::endl;
+        w_max_ = cfg_.ratio_weight_max;
+        ceiling_scanned_ = false;
+        if (w_max_ <= 0.0) {
+            w_max_ = 1.05 * (cfg_.ratio_weight_proposals > 0 ? std::max(m_pbarp, m_pp)
+                                                               : (h == 1 ? m_pbarp : m_pp));
+            ceiling_scanned_ = true;
+        }
+        std::cout << "  accept-reject ceiling on sigma_el: w_max = " << w_max_
+                  << (ceiling_scanned_ ? "  (scanned, +5%)" : "  (ratio_weight_max)") << std::endl;
+        if (!(w_max_ > 0.0)) {
+            std::cerr << "ERROR: sigma_el(s) is zero everywhere; rescattering stage "
+                         "disabled." << std::endl;
+            return false;
+        }
+        return true;
+    }
+
     const char *applyLabel() const {
-        return cfg_.ratio_weight_accept
-                   ? "accept-reject on w_pbarp + w_pp"
-                   : "carried, w_pbarp / w_pp";
+        if (!cfg_.ratio_weight_accept) return "carried, w_pbarp / w_pp";
+        if (cfg_.ratio_rescatter) {
+            return cfg_.ratio_weight_hypothesis == 1
+                       ? "rescattering: recoil + pbar scattered, accept on sigma_el"
+                       : "rescattering: recoil + produced p scattered, accept on sigma_el";
+        }
+        switch (cfg_.ratio_weight_hypothesis) {
+            case 1:  return "accept-reject on w_pbarp: pbar-p class only";
+            case 2:  return "accept-reject on w_pp: p-p class only";
+            default: return "accept-reject on w_pbarp + w_pp";
+        }
     }
 
     WeightConfig cfg_;
@@ -910,6 +1252,9 @@ private:
     long long n_keep_          = 0;
     long long n_reject_resc_   = 0;
     long long n_over_          = 0;
+    // Rescatter side (ratio_weight_apply: rescatter): sigma_el(s) tables.
+    double              el_s_lo_ = 0.0, el_ds_ = 0.0;
+    std::vector<double> el_pbarp_, el_pp_;
 };
 
 #endif // EVENT_WEIGHTER_H

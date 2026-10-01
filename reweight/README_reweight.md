@@ -558,19 +558,20 @@ w_pp    = sigma_pp   (s_rp,    t) / D_gen(s_rp,    t)
 
 — each model at its own s, divided by the same generated `(s, t)`
 density evaluated at that point. Both are written as truth-ntuple
-branches `w_pbarp`, `w_pp`, `w_ratio` (their ratio) and `w_event` (their
-product), alongside `t`, `s_pbarp`, `s_pp`, and optionally as a
+branches `w_pbarp`, `w_pp`, `w_ratio` (their ratio) and `w_event` (the
+weight the accept-reject used), alongside `t`, `s_pbarp`, `s_pp`, and optionally as a
 two-column sidecar (`ratio_weight_sidecar:`), one line per LUND event.
 
 **Which mode the run used matters for everything below.** By default
 (`ratio_weight_apply: accept`) the generator accept-rejects on
-`w_pbarp · w_pp`, so the weights are *already in the sample*: it is one
-unweighted LUND file distributed as `D_gen × w_pbarp × w_pp`, and
+`w_pbarp + w_pp` (or, with `ratio_weight_hypothesis: pbarp | pp`, on
+that one class's weight), so the weights are *already in the sample*: it
+is one unweighted LUND file distributed as `D_gen × w_event`, and
 re-weighting it by the ntuple branches would apply them twice. The
 tools here — `extract_dsdt_ratio.py` above all — expect a **carried**
 run (`ratio_weight_apply: carry`), where nothing is selected and the
 weights are still to be applied. On an accept-reject run use
-`extract_dsdt_ratio.py --no-weights`, or make the reference sample with
+`extract_dsdt_ratio.py --unweighted`, or make the reference sample with
 a separate carry-mode run.
 
 Nothing is normalized in carry mode: any overall constant in a model

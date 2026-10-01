@@ -809,7 +809,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
                        const std::string& input_filename = "input.txt") {
     auto input = readInputFile(input_filename);
 
-    if (input.num_events <= 0) {
+    if (input.num_events <= 0 && input.weights.ratio_weight_proposals <= 0) {
         cerr << "ERROR: num_events <= 0 in input file.\n";
         return;
     }
@@ -890,6 +890,12 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
 
     // Accept-reject weight surfaces (weight_func, mom_weight, xsec_weight).
     // All the loading and evaluation lives in EventWeighter.h.
+    // Largest pair s the reaction can reach, for the rescattering tables:
+    // W^2 <= M^2 + 2 M E_beam, and a pair's mass is at most W - m_p (the
+    // third particle at rest in the W frame).
+    input.weights.rescatter_s_max =
+        std::pow(std::sqrt(target_mass * target_mass + 2.0 * target_mass * input.beam_energy)
+                 - PDG::proton, 2);
     EventWeighter weighter(input.weights);
     weighter.load();
 
@@ -942,6 +948,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     double nt_Q2 = 0, nt_W = 0, nt_M = 0, nt_Ep = 0, nt_theta = 0;
     double nt_w_pbarp = 1, nt_w_pp = 1, nt_w_ratio = 1, nt_w_event = 1;
     double nt_t = 0, nt_s_pbarp = 0, nt_s_pp = 0;
+    double nt_t_resc = NAN, nt_t_obs = NAN;
+    int    nt_resc_class = 0;
     if (!input.truth_ntuple_file.empty()) {
         truth_tf = TFile::Open(input.truth_ntuple_file.c_str(), "RECREATE");
         if (!truth_tf || truth_tf->IsZombie()) {
@@ -968,9 +976,18 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             truth_tree->Branch("t",       &nt_t,       "t/D");
             truth_tree->Branch("s_pbarp", &nt_s_pbarp, "s_pbarp/D");
             truth_tree->Branch("s_pp",    &nt_s_pp,    "s_pp/D");
+            // Which rescattering class the run selected (ratio_weight_
+            // hypothesis): 0 both / untagged, 1 pbar-p, 2 p-p. Survives
+            // hadd-ing the two halves of a split-then-cat mixture.
+            truth_tree->Branch("resc_class", &nt_resc_class, "resc_class/I");
+            // ratio_weight_apply: rescatter -- the rescattering's own t,
+            // (recoil - recoil')^2, and the observed (target - recoil')^2.
+            // Without a rescattering t_resc is NaN and t_obs = t.
+            truth_tree->Branch("t_resc", &nt_t_resc, "t_resc/D");
+            truth_tree->Branch("t_obs",  &nt_t_obs,  "t_obs/D");
             cout << "Truth ntuple enabled: " << input.truth_ntuple_file
                  << ":truth  (Q2, W, M, Ep, theta_e, w_pbarp, w_pp, w_ratio, "
-                    "w_event, t, s_pbarp, s_pp)"
+                    "w_event, t, s_pbarp, s_pp, resc_class, t_resc, t_obs)"
                  << endl;
         }
     }
@@ -983,12 +1000,24 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     long long n_reject_finalcheck  = 0;
 
     const int target_events = input.num_events;
+    // ratio_weight_proposals: stop on the number of events the
+    // rescattering stage has weighted instead, so the kept count is
+    // proportional to the selected class's generated cross section.
+    const long long target_proposals = weighter.ratioProposals();
     const int progress_step = std::max(1, target_events / 10);
 
-    cout << "Generating " << target_events << " events (with retry on rejection)..." << endl;
+    if (target_proposals > 0) {
+        cout << "Generating until " << target_proposals << " proposals reach the "
+                "rescattering stage (num_events ignored; kept count = physical "
+                "yield at w_max = " << weighter.ratioMax() << ")..." << endl;
+    } else {
+        cout << "Generating " << target_events << " events (with retry on rejection)..." << endl;
+    }
 
-    // ---- Main generation loop: keep going until we have num_events good events ----
-    while ((int)all_final_particles.size() < target_events) {
+    // ---- Main generation loop: keep going until we have num_events good
+    // events, or until target_proposals have been weighted ----
+    while (target_proposals > 0 ? weighter.nRatioEval() < target_proposals
+                                : (int)all_final_particles.size() < target_events) {
         ++n_attempts;
 
         // Generate a single scattered electron
@@ -1071,13 +1100,19 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         // Rescattering stage (ratio_weight). The one ep -> e'p p pbar
         // final state holds both rescattering subsystems, so the event
         // carries a weight for each and, in the default accept-reject
-        // mode, is kept with probability (w_pbarp * w_pp) / w_max -- the
-        // generated distribution multiplied by both weights. In carry
-        // mode nothing is selected and the weights ride along in the
-        // truth ntuple and the sidecar instead.
+        // mode, is kept with probability (w_pbarp + w_pp) / w_max -- the
+        // incoherent mixture of the two classes -- or, with
+        // ratio_weight_hypothesis: pbarp | pp, with that one class's
+        // weight over w_max. In carry mode nothing is selected and the
+        // weights ride along in the truth ntuple and the sidecar instead.
+        // In rescatter mode the event is kept on the class's sigma_el(s)
+        // and its pair is then scattered elastically, in final_particles
+        // itself, so everything written below sees the rescattered momenta.
         EventWeighter::RatioVars rv;
-        const EventWeighter::RatioAccept resc =
-            weighter.acceptRescattering(kin, gen.rnd, &rv);
+        EventWeighter::RescatterInfo ri;
+        const EventWeighter::RatioAccept resc = weighter.rescatterMode()
+            ? weighter.rescatter(kin, final_particles, gen.rnd, &rv, &ri)
+            : weighter.acceptRescattering(kin, gen.rnd, &rv);
         if (!resc.keep) continue;
         const EventWeighter::RatioWeights w_resc = resc.w;
 
@@ -1096,6 +1131,9 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             nt_t       = rv.t;
             nt_s_pbarp = rv.s_pbarp;
             nt_s_pp    = rv.s_pp;
+            nt_resc_class = w_resc.hypo;
+            nt_t_resc  = ri.t_resc;
+            nt_t_obs   = weighter.rescatterMode() ? ri.t_obs : rv.t;
             truth_tree->Fill();
         }
 
@@ -1184,7 +1222,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         }
 
         // Progress report
-        if (n_accepted % progress_step == 0) {
+        if (target_proposals == 0 && n_accepted % progress_step == 0) {
             cout << "  Progress: " << n_accepted << " / " << target_events
                  << " good events  (attempts: " << n_attempts << ")" << endl;
         }
@@ -1272,9 +1310,17 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
                     wout << accepted_w[i].w_pbarp << " " << accepted_w[i].w_pp << "\n";
 
                 int num_particles = (int)all_final_particles[i].size();
+                // Header column 9 is the LUND process ID. A single-class
+                // rescattering run (ratio_weight_hypothesis: pbarp | pp)
+                // writes its class there, 1 or 2, so the label survives
+                // cat-ing the two halves into one mixture file; any other
+                // run keeps the old value.
+                const int resc_class = accepted_w[i].hypo;
                 fout << "\t" << num_particles
                      << " " << 1 << " " << 1 << " " << 0. << " " << 0 << " " << 11 << " " << input.beam_energy
-                     << " " << 2212 << " " << PDG::proton << " " << "0\n";
+                     << " " << 2212 << " ";
+                if (resc_class != 0) fout << resc_class; else fout << PDG::proton;
+                fout << " " << "0\n";
 	
 		double vx_rand = gen.rnd.Uniform(-0.2, 0.2);
 		double vy_rand = gen.rnd.Uniform(-0.2, 0.2);
