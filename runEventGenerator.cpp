@@ -189,6 +189,11 @@ struct ReadInput {
     Range theta_range     {0,0,false}; // stored in radians
     double W_min          = 0;
     double t_slope        = 0;
+    // u-channel share of the first vertex: with probability u_fraction an
+    // event puts its slope (u_slope) on u' instead of t', so X comes out
+    // backward and the recoil forward. 0 = t-channel only (the old behaviour).
+    double u_slope        = 0;
+    double u_fraction     = 0;
     std::string reaction;
     bool print_debug      = false;
     bool write_lund       = true;
@@ -291,6 +296,15 @@ ReadInput readInputFile(const string &filename) {
             iss >> input.W_min;
         } else if (key == "t_slope") {
             iss >> input.t_slope;
+        } else if (key == "u_slope") {
+            iss >> input.u_slope;
+        } else if (key == "u_fraction") {
+            iss >> input.u_fraction;
+            if (!(input.u_fraction >= 0.0 && input.u_fraction <= 1.0)) {
+                cerr << "WARNING: u_fraction " << input.u_fraction
+                     << " outside [0, 1]; clamped." << endl;
+                input.u_fraction = std::clamp(input.u_fraction, 0.0, 1.0);
+            }
         } else if (key == "reaction") {
             // rest of the line is the reaction string
             std::string rest;
@@ -621,10 +635,15 @@ public:
     }
 
     
+    // backward = true puts the slope on u' instead of t': d1 then peaks
+    // backward (cosT -> -1) and d2 forward. At fixed W and masses t and u
+    // are both linear in cosT over the same range dt (s + t + u is fixed),
+    // so exp(-B u') is exactly the mirror image cosT -> -cosT of exp(-B t').
     DecayResult twoBodyDecayWeighted(const TLorentzVector &parent_lab,
                                  double m1, double m2,
                                  double B,
                                  const TLorentzVector &p_virtual_lab,
+                                 bool backward = false,
                                  int nCandidates = 10000) {
         double M = parent_lab.M();
         TLorentzVector nanv(0,0,0,0);
@@ -680,6 +699,7 @@ public:
             // t_max -> cosT=+1 (forward), t_min -> cosT=-1 (backward)
             const double frac = (t_sampled - t_min) / dt;
             cosT = std::clamp(2.0 * frac - 1.0, -1.0, 1.0);
+            if (backward) cosT = -cosT;                 // the same draw in u'
         } else {
             cosT = rnd.Uniform(-1.0, 1.0);
         }
@@ -829,9 +849,17 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
                      "M(X); M_{X} [GeV]; Counts",
                      100, 0, 0);
 
-    // Weighted-variable histograms
+    TH1D *h_theta_X = new TH1D("h_theta_X",
+                     "cos#theta^{*}_{X}; cos#theta; Counts",
+                     100, -1, 1);
+
+    // Weighted-variable histograms. h_t holds the t-channel events, h_u the
+    // u-channel ones (u_fraction > 0), each in its own slope variable.
     TH1D *h_t   = new TH1D("h_t",
-                     "|t - t_{0}|; |t - t_{0}| [GeV^{2}]; Counts",
+                     "|t - t_{0}| (t-channel events); |t - t_{0}| [GeV^{2}]; Counts",
+                     200, 0.0, 0.0);
+    TH1D *h_u   = new TH1D("h_u",
+                     "|u - u_{0}| (u-channel events); |u - u_{0}| [GeV^{2}]; Counts",
                      200, 0.0, 0.0);
     TH1D *h_Q2  = new TH1D("h_Q2",
                      "Q^{2} distribution; Q^{2} [GeV^{2}]; Counts",
@@ -854,6 +882,33 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     TH1D *h_int = new TH1D("h_int",
                      "M(p pbar); Mass [GeV]; Counts",
                      100, 0, 0);
+    TH1D *h_int_theta = new TH1D("h_int_theta",
+                     "cos#theta^{*}_{p pbar}; cos#theta; Counts",
+                     100, -1, 1);
+    TH1D *h_theta_p1_CM = new TH1D("h_theta_p1_CM",
+                     "cos#theta^{*}_{p1} (faster proton, lab |p|); cos#theta; Counts",
+                     100, -1, 1);
+
+    TH1D *h_theta_p2_CM = new TH1D("h_theta_p2_CM",
+                     "cos#theta^{*}_{p2} (slower proton, lab |p|); cos#theta; Counts",
+                     100, -1, 1);
+
+    TH1D *h_phi_pbar_CM = new TH1D("h_phi_pbar_CM",
+                     "cos#theta^{*}_{pbar}; cos#theta; Counts",
+                     100, -1, 1);
+
+    // Pair angles with the protons ranked by lab |p| (p1 = faster), the way
+    // the data pairs them: (p1 pbar), (p2 pbar) and the like-sign (p1 p2).
+    // A pair's cos(theta*) is minus that of the third particle.
+    TH1D *h_theta_p1pbar_CM = new TH1D("h_theta_p1pbar_CM",
+                     "cos#theta^{*}_{p_{1}#bar{p}} (faster proton + #bar{p}); cos#theta; Counts",
+                     100, -1, 1);
+    TH1D *h_theta_p2pbar_CM = new TH1D("h_theta_p2pbar_CM",
+                     "cos#theta^{*}_{p_{2}#bar{p}} (slower proton + #bar{p}); cos#theta; Counts",
+                     100, -1, 1);
+    TH1D *h_theta_p1p2_CM = new TH1D("h_theta_p1p2_CM",
+                     "cos#theta^{*}_{p_{1}p_{2}} (like-sign pair); cos#theta; Counts",
+                     100, -1, 1);
 
     TLorentzVector p_target(0,0,0,target_mass);
     TLorentzVector p_beam(0,0,input.beam_energy,input.beam_energy);
@@ -928,6 +983,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     TFile *truth_tf = nullptr;
     TTree *truth_tree = nullptr;
     double nt_Q2 = 0, nt_W = 0, nt_M = 0, nt_Ep = 0, nt_theta = 0;
+    int    nt_u_channel = 0;   // 1 = the event was drawn u-channel (X backward)
     // Final-state block, fixed-capacity so it reads back as plain 2-D numpy
     // arrays (uproot needs no awkward for `fs_px[8]/D`). Holds every
     // final-state particle including the scattered electron; consumers
@@ -951,6 +1007,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             truth_tree->Branch("M",       &nt_M,     "M/D");
             truth_tree->Branch("Ep",      &nt_Ep,    "Ep/D");
             truth_tree->Branch("theta_e", &nt_theta, "theta_e/D");
+            truth_tree->Branch("u_channel", &nt_u_channel, "u_channel/I");
             truth_tree->Branch("nfs",     &nt_nfs,   "nfs/I");
             truth_tree->Branch("fs_pid",  nt_fs_pid, "fs_pid[8]/I");
             truth_tree->Branch("fs_px",   nt_fs_px,  "fs_px[8]/D");
@@ -958,7 +1015,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             truth_tree->Branch("fs_pz",   nt_fs_pz,  "fs_pz[8]/D");
             truth_tree->Branch("fs_E",    nt_fs_E,   "fs_E[8]/D");
             cout << "Truth ntuple enabled: " << input.truth_ntuple_file
-                 << ":truth  (Q2, W, M, Ep, theta_e + final-state "
+                 << ":truth  (Q2, W, M, Ep, theta_e, u_channel + final-state "
                  << "nfs, fs_pid[8], fs_px/py/pz/E[8])" << endl;
         }
     }
@@ -1004,8 +1061,13 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         // W -> pdg1 + pdg2
         // We want t-slope weighting on the gamma* - "meson" leg.
         // Here we assume pdg2 is the "X" or meson-like object.
+        // With probability u_fraction the event is u-channel instead: the
+        // slope goes on u' and X comes out backward. The random number is
+        // only drawn when u_fraction > 0, so t-only runs keep their sequence.
+        const bool u_channel = input.u_fraction > 0.0 && gen.rnd.Uniform() < input.u_fraction;
         auto decay1 = gen.twoBodyDecayWeighted(v_W, m2, m1,
-                                               input.t_slope, v_virtual);
+                                               u_channel ? input.u_slope : input.t_slope,
+                                               v_virtual, u_channel);
 
         TLorentzVector p1_lab = decay1.d2_lab; // corresponds to m1
         TLorentzVector p2_lab = decay1.d1_lab; // corresponds to m2
@@ -1059,6 +1121,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             nt_M     = kin.M_X;
             nt_Ep    = kin.Ep;
             nt_theta = v_scattered.Theta() * TMath::RadToDeg();
+            nt_u_channel = u_channel ? 1 : 0;
             nt_nfs = 0;
             for (int k = 0; k < kMaxFS; ++k) {
                 nt_fs_pid[k] = 0;
@@ -1095,9 +1158,11 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         // which ranges from 0 (forward peak) to (t_max - t_min).
         double t_val = invariantSquare(v_virtual, p2_lab, false); // (q - p_X)^2
         double t_shifted = abs(t_val - decay1.t_max); // >= 0, same variable as in the weighting
-        if (std::isfinite(t_shifted)){// && t_shifted >= 0.0) {
-            h_t->Fill(t_shifted);
-        }
+        // u' = distance from the BACKWARD end, the variable the u-channel
+        // events were drawn in (u is linear in t at fixed W and masses)
+        double u_shifted = abs(t_val - decay1.t_min);
+        if (!u_channel && std::isfinite(t_shifted)) h_t->Fill(t_shifted);
+        if ( u_channel && std::isfinite(u_shifted)) h_u->Fill(u_shifted);
         double Q2_val = -v_virtual.M2();
         if (std::isfinite(Q2_val)) h_Q2->Fill(Q2_val);
         double Ep_val = v_scattered.E();
@@ -1107,6 +1172,43 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         TLorentzVector X_lab = p2_lab;                  // X from W -> p + X
         double mX_true = X_lab.M();
         h_X->Fill(mX_true);                             // use this, not m2
+
+        // cos(theta*) in the gamma* p CM (the W rest frame), measured from the
+        // virtual-photon direction -- the frame the analysis uses.
+        const TVector3 bW = v_W.BoostVector();
+        TLorentzVector q_cm = v_virtual;
+        q_cm.Boost(-bW);
+        const TVector3 q_hat = q_cm.Vect().Unit();
+        auto cosCM = [&](TLorentzVector v) {
+            v.Boost(-bW);
+            return v.Vect().Unit().Dot(q_hat);
+        };
+        h_theta_X->Fill(cosCM(X_lab));
+        // Protons ranked by lab |p|, p1 = faster -- how the two are told apart
+        // in the data, and the ranking h_p_lead / h_p_sub use below.
+        const TLorentzVector *p_fast = nullptr, *p_slow = nullptr, *p_bar = nullptr;
+        for (const auto& pr : final_particles) {
+            if (pr.first == -2212) {
+                if (!p_bar) p_bar = &pr.second;
+                const double c = cosCM(pr.second);
+                if (std::isfinite(c)) h_phi_pbar_CM->Fill(c);
+            } else if (pr.first == 2212) {
+                if (!p_fast || pr.second.P() > p_fast->P()) { p_slow = p_fast; p_fast = &pr.second; }
+                else if (!p_slow || pr.second.P() > p_slow->P()) { p_slow = &pr.second; }
+            }
+        }
+        if (p_fast && p_slow) {
+            const double c1 = cosCM(*p_fast), c2 = cosCM(*p_slow);
+            if (std::isfinite(c1)) h_theta_p1_CM->Fill(c1);
+            if (std::isfinite(c2)) h_theta_p2_CM->Fill(c2);
+            const double c12 = cosCM(*p_fast + *p_slow);
+            if (std::isfinite(c12)) h_theta_p1p2_CM->Fill(c12);
+            if (p_bar) {
+                const double c1b = cosCM(*p_fast + *p_bar), c2b = cosCM(*p_slow + *p_bar);
+                if (std::isfinite(c1b)) h_theta_p1pbar_CM->Fill(c1b);
+                if (std::isfinite(c2b)) h_theta_p2pbar_CM->Fill(c2b);
+            }
+        }
 
         // Collect final-state protons and antiprotons from THIS event
         std::vector<TLorentzVector> protons;
@@ -1135,17 +1237,19 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         if (!protons.empty() && !pbars.empty()) {
             double best_d = 1e99;
             double best_m = NAN;
+            TLorentzVector best_pair;
 
             for (const auto& p : protons) {
                 for (const auto& pb : pbars) {
                     double m = (p + pb).M();
                     double d = std::abs(m - mX_true);
-                    if (d < best_d) { best_d = d; best_m = m; }
+                    if (d < best_d) { best_d = d; best_m = m; best_pair = p + pb; }
                 }
             }
 
             if (std::isfinite(best_m)) {
                 h_int->Fill(best_m); // reconstructed M(X) from daughters
+                h_int_theta->Fill(cosCM(best_pair));
             }
         }
 
@@ -1272,38 +1376,41 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     // Fit -t distribution with exp(-B * t') and compare to input
     // (always do this if we have events, independent of gen_plots)
     // -----------------------------------------------------
-    if (h_t->GetEntries() > 50) {
-        double fit_lo = h_t->GetBinLowEdge(2);
+    // The same check for the u-channel events (h_u against u_slope) when
+    // u_fraction > 0. The fit is stored on the histogram as `fname`.
+    auto verifySlope = [](TH1D *h, double B_in, const char *fname, const char *label) {
+        if (h->GetEntries() <= 50) return;
+        double fit_lo = h->GetBinLowEdge(2);
 
         // Restrict to ~2 mean values: beyond this kinematic phase space
         // dominates over the exponential weighting, especially at small B
-        double mean_t = h_t->GetMean();
+        double mean_t = h->GetMean();
         double fit_hi = std::min(
-            h_t->GetXaxis()->GetBinUpEdge(h_t->FindLastBinAbove(5)),
+            h->GetXaxis()->GetBinUpEdge(h->FindLastBinAbove(5)),
             2.0 * mean_t
         );
         if (fit_hi <= fit_lo) fit_hi = mean_t;
 
-        TF1 *f_exp = new TF1("f_exp", "[0]*exp(-[1]*x)", fit_lo, fit_hi);
-        f_exp->SetParameters(h_t->GetMaximum(), input.t_slope > 0 ? input.t_slope : 1.0);
+        TF1 *f_exp = new TF1(fname, "[0]*exp(-[1]*x)", fit_lo, fit_hi);
+        f_exp->SetParameters(h->GetMaximum(), B_in > 0 ? B_in : 1.0);
         f_exp->SetParNames("Norm", "B_fit");
-        h_t->Fit(f_exp, "RQ0");
+        h->Fit(f_exp, "RQ0");
 
         double B_fit   = f_exp->GetParameter(1);
         double B_err   = f_exp->GetParError(1);
         double chi2ndf = (f_exp->GetNDF() > 0)
                     ? f_exp->GetChisquare() / f_exp->GetNDF() : -1;
 
-        cout << "\n===== t-slope verification =====" << endl;
-        cout << "  Input  t_slope (B_in):  " << input.t_slope << " GeV^{-2}" << endl;
-        cout << "  Fitted t_slope (B_fit): " << std::fixed << std::setprecision(3)
+        cout << "\n===== " << label << "-slope verification =====" << endl;
+        cout << "  Input  " << label << "_slope (B_in):  " << B_in << " GeV^{-2}" << endl;
+        cout << "  Fitted " << label << "_slope (B_fit): " << std::fixed << std::setprecision(3)
             << B_fit << " +/- " << B_err << " GeV^{-2}" << endl;
         cout << "  Fit range:              [" << fit_lo << ", " << fit_hi << "] GeV^2" << endl;
         cout << "  chi2/ndf:               " << std::setprecision(2) << chi2ndf << endl;
 
         // For B=0, just check the shape is flat; pull only meaningful for B > 0
-        if (input.t_slope > 0) {
-            double pull = std::abs(B_fit - input.t_slope) / std::max(B_err, 1e-9);
+        if (B_in > 0) {
+            double pull = std::abs(B_fit - B_in) / std::max(B_err, 1e-9);
             if (pull < 3.0)
                 cout << "  Status: PASS (|pull| = " << std::setprecision(1) << pull << ")" << endl;
             else
@@ -1312,6 +1419,14 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             cout << "  Status: B=0 (flat generation), fitted B = " << B_fit << endl;
         }
         cout << "================================\n" << endl;
+    };
+    verifySlope(h_t, input.t_slope, "f_exp", "t");
+    if (input.u_fraction > 0.0) {
+        cout << "u-channel fraction: requested " << input.u_fraction << ", generated "
+             << std::setprecision(4)
+             << h_u->GetEntries() / std::max(1.0, h_t->GetEntries() + h_u->GetEntries())
+             << endl;
+        verifySlope(h_u, input.u_slope, "f_exp_u", "u");
     }
 
     if (input.gen_plots) {
@@ -1354,6 +1469,32 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         }
         leg_t->Draw();
 
+        // -u distribution of the u-channel events, the same way
+        if (input.u_fraction > 0.0) {
+            TCanvas *c4u = new TCanvas("c4u", "-u Distribution (u-channel events)", 800, 600);
+            h_u->SetLineColor(kBlue);
+            h_u->SetLineWidth(2);
+            h_u->Draw();
+            TF1 *fu_drawn = h_u->GetFunction("f_exp_u");
+            if (fu_drawn) {
+                fu_drawn->SetLineColor(kRed);
+                fu_drawn->SetLineWidth(2);
+                fu_drawn->Draw("SAME");
+            }
+            TLegend *leg_u = new TLegend(0.45, 0.70, 0.88, 0.88);
+            leg_u->AddEntry(h_u, "Generated u - u_{min}", "l");
+            if (fu_drawn) {
+                char buf[128];
+                snprintf(buf, sizeof(buf),
+                         "Fit: exp(-B #upoint u'), B = %.2f #pm %.2f",
+                         fu_drawn->GetParameter(1), fu_drawn->GetParError(1));
+                leg_u->AddEntry(fu_drawn, buf, "l");
+                snprintf(buf, sizeof(buf), "Input u_slope = %.2f", input.u_slope);
+                leg_u->AddEntry((TObject*)nullptr, buf, "");
+            }
+            leg_u->Draw();
+        }
+
         // Q2 distribution
         TCanvas *c5 = new TCanvas("c5", "Q2 Distribution", 800, 600);
         // gPad->SetLogy();
@@ -1387,6 +1528,84 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         leg_p->AddEntry(h_p_sub,  "Sub-leading proton |p|", "l");
         leg_p->Draw();
         // c7->SaveAs("proton_momenta.png"); // viewable even in batch (-b) mode
+
+        // cos(theta*) in the gamma* p CM: X (truth and the reconstructed pair
+        // closest to M_X), and each final-state particle by role
+        TCanvas *c8 = new TCanvas("c8", "cos(theta*) in the gamma* p CM", 1200, 500);
+        c8->Divide(2, 1);
+        c8->cd(1);
+        h_theta_X->SetLineColor(kRed);
+        h_theta_X->SetLineWidth(2);
+        h_theta_X->SetMaximum(1.1 * std::max(h_theta_X->GetMaximum(), h_int_theta->GetMaximum()));
+        h_theta_X->GetYaxis()->SetRangeUser(0, h_theta_X->GetMaximum() * 1.1);
+        h_theta_X->Draw();
+        h_int_theta->Draw("SAMEE");
+        TLegend *leg_x = new TLegend(0.15, 0.72, 0.55, 0.88);
+        leg_x->AddEntry(h_theta_X,   "X (truth)", "l");
+        leg_x->AddEntry(h_int_theta, "p#bar{p} closest to M_{X}", "lep");
+        leg_x->Draw();
+        c8->cd(2);
+        h_theta_p1_CM->SetLineColor(kBlue);
+        h_theta_p2_CM->SetLineColor(kRed);
+        h_phi_pbar_CM->SetLineColor(kGreen + 2);
+        for (TH1D *h : {h_theta_p1_CM, h_theta_p2_CM, h_phi_pbar_CM}) h->SetLineWidth(2);
+        h_theta_p1_CM->SetMaximum(1.1 * std::max({h_theta_p1_CM->GetMaximum(),
+                                                  h_theta_p2_CM->GetMaximum(),
+                                                  h_phi_pbar_CM->GetMaximum()}));
+        h_theta_p1_CM->GetYaxis()->SetRangeUser(0, h_theta_p1_CM->GetMaximum() * 1.1);
+        h_theta_p1_CM->SetTitle("Final-state particles; cos#theta^{*}; Counts");
+        h_theta_p1_CM->Draw("E");
+        h_theta_p2_CM->Draw("SAMEE");
+        h_phi_pbar_CM->Draw("SAMEE");
+        TLegend *leg_c = new TLegend(0.35, 0.72, 0.75, 0.88);
+        leg_c->AddEntry(h_theta_p1_CM, "p_{1}: faster proton (lab |p|)", "l");
+        leg_c->AddEntry(h_theta_p2_CM, "p_{2}: slower proton", "l");
+        leg_c->AddEntry(h_phi_pbar_CM, "#bar{p}", "l");
+        leg_c->Draw();
+
+        // Pair cos(theta*) with the protons ranked by lab |p|: left, the
+        // three pairings; right, what the like-sign subtraction makes of them
+        // -- pooled (p1 pbar + p2 pbar), like-sign (p1 p2), and pooled - LS
+        TCanvas *c9 = new TCanvas("c9", "Pair cos(theta*) in the gamma* p CM, momentum-ranked", 1200, 500);
+        c9->Divide(2, 1);
+        c9->cd(1);
+        h_theta_p1pbar_CM->SetLineColor(kBlue);
+        h_theta_p2pbar_CM->SetLineColor(kRed);
+        h_theta_p1p2_CM->SetLineColor(kGreen + 2);
+        for (TH1D *h : {h_theta_p1pbar_CM, h_theta_p2pbar_CM, h_theta_p1p2_CM}) h->SetLineWidth(2);
+        h_theta_p1pbar_CM->SetMaximum(1.1 * std::max({h_theta_p1pbar_CM->GetMaximum(),
+                                                      h_theta_p2pbar_CM->GetMaximum(),
+                                                      h_theta_p1p2_CM->GetMaximum()}));
+        h_theta_p1pbar_CM->SetMinimum(0);
+        h_theta_p1pbar_CM->SetTitle("Pairs, protons ranked by lab |p|; cos#theta^{*}_{pair}; Counts");
+        h_theta_p1pbar_CM->Draw("HIST");
+        h_theta_p2pbar_CM->Draw("HIST SAME");
+        h_theta_p1p2_CM->Draw("HIST SAME");
+        TLegend *leg_pr = new TLegend(0.30, 0.72, 0.70, 0.88);
+        leg_pr->AddEntry(h_theta_p1pbar_CM, "p_{1}#bar{p} (faster proton)", "l");
+        leg_pr->AddEntry(h_theta_p2pbar_CM, "p_{2}#bar{p} (slower proton)", "l");
+        leg_pr->AddEntry(h_theta_p1p2_CM,   "p_{1}p_{2} (like-sign)", "l");
+        leg_pr->Draw();
+
+        c9->cd(2);
+        TH1D *h_pooled = (TH1D *)h_theta_p1pbar_CM->Clone("h_theta_pooled_CM");
+        h_pooled->Add(h_theta_p2pbar_CM);
+        TH1D *h_ls_sub = (TH1D *)h_pooled->Clone("h_theta_pooled_minus_LS_CM");
+        h_ls_sub->Add(h_theta_p1p2_CM, -1.0);
+        h_pooled->SetLineColor(kBlue);
+        h_ls_sub->SetLineColor(kBlack);
+        TH1D *h_ls = (TH1D *)h_theta_p1p2_CM->Clone("h_theta_LS_CM");
+        h_pooled->SetMaximum(1.1 * h_pooled->GetMaximum());
+        h_pooled->SetMinimum(std::min(0.0, 1.1 * h_ls_sub->GetMinimum()));
+        h_pooled->SetTitle("Like-sign subtraction; cos#theta^{*}_{pair}; Counts");
+        h_pooled->Draw("HIST");
+        h_ls->Draw("HIST SAME");
+        h_ls_sub->Draw("HIST SAME");
+        TLegend *leg_ls = new TLegend(0.30, 0.72, 0.70, 0.88);
+        leg_ls->AddEntry(h_pooled, "pooled (p_{1}#bar{p} + p_{2}#bar{p})", "l");
+        leg_ls->AddEntry(h_ls,     "like-sign (p_{1}p_{2})", "l");
+        leg_ls->AddEntry(h_ls_sub, "pooled #minus like-sign", "l");
+        leg_ls->Draw();
     }
 
     cout << "Event generation complete." << endl;

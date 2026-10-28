@@ -94,6 +94,8 @@ Any lines beginning with # are ignored.
 | theta_range | Range of scattered electron theta             | float float |
 | E_range     | Range of scattered electron energy            | float float |
 | t_slope     | Weighting parameter for t-slope               | float      |
+| u_slope     | Slope on u' for the u-channel events (X backward, recoil forward) | float |
+| u_fraction  | Probability that an event is u-channel instead of t-channel (default 0) | float in [0, 1] |
 | write_lund  | Write output LUND file                         | int (0 / 1) |
 | gen_plots   | Show plots                                    | int (0 / 1) |
 | print_debug | Print debug information                        | int (0 / 1) |

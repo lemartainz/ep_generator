@@ -6,9 +6,11 @@ target_pid:     2212
 theta_range:    5 35
 E_range:        0 10
 Q2_range:       0 10
-t_slope:        0
+t_slope:        2
+u_slope:        1
+u_fraction:     0.33
 print_debug:    0
-write_lund:     1
+write_lund:     0
 gen_plots:      1
 reaction:       2212, 9999: 9999, 2212, -2212
 mass_9999: BW 2. 0.4
@@ -48,8 +50,8 @@ mass_9999: BW 2. 0.4
 # picked as "the one from X". Use instead of xsec_weight, and always add
 # every line the builder prints: the surfaces were fitted together.
 #   Format:  pair_weight: <root file> <hist name> <pidA> <pidB>
-pair_weight: pair_weight.root w_pair_2212_-2212 2212 -2212
-pair_weight: pair_weight.root w_pair_2212_2212  2212  2212
+# pair_weight: pair_weight.root w_pair_2212_-2212 2212 -2212
+# pair_weight: pair_weight.root w_pair_2212_2212  2212  2212
 
 # Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e) plus the final-state
 # 4-vectors (nfs, fs_pid[8], fs_px/py/pz/E[8]). Needed to measure the
