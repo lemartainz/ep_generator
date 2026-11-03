@@ -38,6 +38,18 @@ Q2 and W are projections of the FIRST target (both targets come from the
 same events, so their Q2 and W marginals agree up to the pooling factor);
 --unweighted is drawn scaled to the same integral, to show what the
 weighting did.
+
+4-D targets, (Q2, W, M, -t') with -t' that of the particle the pair leaves
+out (build_pair_weight.py), add
+
+    <out>_tp_<pair>.pdf     the same pages with -t' on x, M summed out
+
+while the _3d pages show M with -t' summed out, and the 1-D page gets a
+-t' panel. Both sums run over EVERY cell: a bin is hatched when less than
+half of its cross section sits in cells the builder fitted (the rest got the
+pass-through factor and follow the proposal, not the data). The
+normalization still uses the fitted cells only, and the 1-D panels draw the
+fitted-only cross section dashed.
 """
 
 import argparse
@@ -53,17 +65,24 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt                                   # noqa: E402
 from matplotlib.backends.backend_pdf import PdfPages              # noqa: E402
 
-from truth_ntuple import load_truth, pair_masses, parse_pids, pair_label  # noqa: E402
+from truth_ntuple import (load_truth, pair_masses, pair_entries, parse_pids,  # noqa: E402
+                          pair_label)
 from plot_xsec_closure import load_xsec, load_weight_mask, draw_closure   # noqa: E402
 
 RED, BLUE, GREY = "#c0392b", "#1f3f8b", "0.55"
+M_PROTON = 0.93827208816
 
 
 def pair_hist(a, pids, edges):
-    """(Q2, W, M_AB) histogram of every (A, B) pair, on `edges`."""
-    ev, m, _ = pair_masses(a, *pids)
-    pts = np.column_stack([np.asarray(a["Q2"], float)[ev],
-                           np.asarray(a["W"], float)[ev], m])
+    """(Q2, W, M_AB) histogram of every (A, B) pair, on `edges` -- or
+    (Q2, W, M_AB, -t') for a 4-D grid, -t' that of the rest of the event."""
+    cols = [np.asarray(a["Q2"], float), np.asarray(a["W"], float)]
+    if len(edges) == 4:
+        ev, m, tp, _ = pair_entries(a, *pids, a.get("target_mass", M_PROTON))
+        pts = np.column_stack([c[ev] for c in cols] + [m, tp])
+    else:
+        ev, m, _ = pair_masses(a, *pids)
+        pts = np.column_stack([c[ev] for c in cols] + [m])
     pts = pts[np.isfinite(pts).all(axis=1)]
     H, _ = np.histogramdd(pts, bins=edges)
     return H
@@ -78,7 +97,8 @@ def main():
     ap.add_argument("--lund", required=True, help="the weighted generator run")
     ap.add_argument("--target", action="append", nargs=2, required=True,
                     metavar=("PIDS", "NPZ"),
-                    help="'<pidA,pidB> <xsec3d npz>', repeatable")
+                    help="'<pidA,pidB> <xsec npz>', repeatable; 3-D (Q2, W, M) "
+                         "or 4-D (Q2, W, M, -t')")
     ap.add_argument("--weight", default=None,
                     help="pair_weight.root the run used: its <name>_fitted masks "
                          "decide which cells enter the normalization and are hatched")
@@ -108,7 +128,7 @@ def main():
     targets = []
     for spec, path in args.target:
         pids = parse_pids(spec)
-        D, E, edges = load_xsec(path, args.units, measured=True)
+        D, E, edges = load_xsec(path, args.units, measured=True, dims=(3, 4))
         G = pair_hist(gen, pids, edges)
         U = pair_hist(unw, pids, edges) if unw is not None else None
         name = f"w_pair_{pids[0]}_{pids[1]}"
@@ -145,46 +165,71 @@ def main():
         np.allclose(e1, e2) for e1, e2 in zip(targets[0]["edges"], targets[1]["edges"])))
     ynorm = args.y == "norm"
 
-    # ---- 3-D: one PDF per target; the second target overlaid on the first ----
+    def view(t, drop):
+        """(D, E, G, live, edges) on (Q2, W, x): as is for a 3-D target; for a
+        4-D one with axis `drop` summed out over EVERY cell, and a bin counted
+        as fitted (not hatched) when at least half of its cross section sits
+        in cells the builder fitted."""
+        if drop is None:
+            return t["D"], t["E"], t["G"], t["live"], t["edges"]
+        D = t["D"].sum(axis=drop)
+        fitted = np.where(t["live"], t["D"], 0.0).sum(axis=drop)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            live = np.where(D > 0, fitted / D >= 0.5, t["live"].any(axis=drop))
+        return (D, np.sqrt((t["E"] ** 2).sum(axis=drop)), t["G"].sum(axis=drop), live,
+                [e for a, e in enumerate(t["edges"]) if a != drop])
+
+    # ---- cell by cell: one PDF per target and x variable (M; -t' for a 4-D
+    # ---- target); the second target overlaid on the first ----
     for i, t in enumerate(targets):
-        out = f"{args.out}_3d_{t['tag']}.pdf"
-        ov = None
-        if i == 0 and same_grid:
-            o = targets[1]
-            ov = dict(D=o["D"], E=o["E"], G=o["G"], live=o["live"],
-                      label=tex_label(o["pids"]) + " cross section")
-        rms, med = draw_closure(t["D"], t["E"], t["G"], t["edges"], t["live"], out,
-                                norm=args.norm, ncol=args.ncol, ratio_range=(r_lo, r_hi),
-                                tgt="cross section", m_label=tex_label(t["pids"]),
-                                pair=t["pids"], ynorm=ynorm, scale=scale, ydiv=ydiv,
-                                overlay=ov,
-                                panel_size=tuple(float(v) for v in args.panel_size.split(",")),
-                                ratio_gap=args.ratio_gap,
-                                title=f"Weighted LUND, {tex_label(t['pids'])}"
-                                      + (f"  (+ {tex_label(o['pids'])} overlaid)" if ov else ""))
-        print(f"[3d] {out}: rms pull {rms:.2f}, median |LUND/xsec - 1| = {med:.3f}")
+        o = targets[1] if (i == 0 and same_grid) else None
+        four = t["D"].ndim == 4
+        pages = [("3d", 3 if four else None, tex_label(t["pids"]), "GeV", True)]
+        if four:
+            pages.append(("tp", 2, r"$-t'$ of the rest", "GeV$^2$", False))
+        for kind, drop, xlab, unit, edge in pages:
+            D, E, G, live, edges = view(t, drop)
+            ov = None
+            if o is not None:
+                oD, oE, oG, olive, _ = view(o, drop)
+                ov = dict(D=oD, E=oE, G=oG, live=olive,
+                          label=tex_label(o["pids"]) + " cross section")
+            out = f"{args.out}_{kind}_{t['tag']}.pdf"
+            rms, med = draw_closure(D, E, G, edges, live, out,
+                                    norm=args.norm, ncol=args.ncol, ratio_range=(r_lo, r_hi),
+                                    tgt="cross section", m_label=xlab,
+                                    pair=t["pids"], ynorm=ynorm, scale=scale, ydiv=ydiv,
+                                    overlay=ov, x_unit=unit, kin_edge=edge,
+                                    panel_size=tuple(float(v) for v in args.panel_size.split(",")),
+                                    ratio_gap=args.ratio_gap,
+                                    title=f"Weighted LUND, {tex_label(t['pids'])}"
+                                          + (f"  (+ {tex_label(o['pids'])} overlaid)" if ov else ""))
+            print(f"[{kind}] {out}: rms pull {rms:.2f}, median |LUND/xsec - 1| = {med:.3f}")
 
     # ---- 1-D projections, every target in every panel, common scale ----
-    def proj(t, axis, arr):
-        keep = np.where(t["live"], arr, 0.0)
-        return keep.sum(axis=tuple(a for a in range(3) if a != axis))
+    def proj(t, axis, arr, fitted_only=False):
+        keep = np.where(t["live"], arr, 0.0) if fitted_only else arr
+        return keep.sum(axis=tuple(a for a in range(keep.ndim) if a != axis))
 
     yf = (1.0 / ydiv) if ynorm else 1.0          # LUND counts -> y units
 
     def series(t, axis):
         T = proj(t, axis, t["D"]) * scale * yf
         TE = np.sqrt(proj(t, axis, t["E"] ** 2)) * scale * yf
+        TF = proj(t, axis, t["D"], fitted_only=True) * scale * yf
         g = proj(t, axis, t["G"])
         G = (g * yf, g * yf ** 2)
         U = None
         if t["U"] is not None:
             u = proj(t, axis, t["U"]); U = u * (G[0].sum() / max(u.sum(), 1e-300))
-        return T, TE, G, U
+        return T, TE, TF, G, U
 
     ylabel = ("entries / bin  (norm. to " + tex_label(ref["pids"]) + ")"
               if ynorm else "LUND entries / bin")
     styles = [dict(tc=RED, gc=BLUE, fmt="o", mfc=BLUE), dict(tc="#d35400", gc="#1e8449", fmt="s", mfc="none")]
     axes_spec = [(0, r"$Q^2$ [GeV$^2$]", r"$Q^2$"), (1, "$W$ [GeV]", "$W$"), (2, "$M$ [GeV]", "pair mass")]
+    if all(t["D"].ndim == 4 for t in targets):
+        axes_spec.append((3, r"$-t'$ [GeV$^2$]", r"$-t'$ of the rest of the event"))
     ncol = 2
     nrow = int(np.ceil((len(axes_spec) + 1) / ncol))
     fig = plt.figure(figsize=(6.4 * ncol, 4.3 * nrow))
@@ -199,7 +244,8 @@ def main():
         pulls = []
         for t, st in zip(targets, styles):
             edges = t["edges"][axis]; cc = 0.5 * (edges[:-1] + edges[1:])
-            T, TE, G, U = series(t, axis)
+            T, TE, TF, G, U = series(t, axis)
+            unfit = 1.0 - TF.sum() / max(T.sum(), 1e-300)
             lab = tex_label(t["pids"]) + (" pooled" if t["pids"][0] != t["pids"][1] else "")
             if U is not None:
                 ax.step(edges, np.r_[U, U[-1]], where="post", color=GREY, lw=1.0, ls=":",
@@ -207,6 +253,9 @@ def main():
             ax.fill_between(cc, T, step="mid", color=st["tc"], alpha=0.10)
             ax.errorbar(cc, T, yerr=TE, fmt="none", ecolor=st["tc"], elinewidth=1, capsize=2)
             ax.step(cc, T, where="mid", color=st["tc"], lw=1.6, label=f"cross section, {lab}")
+            if unfit > 1e-3:
+                ax.step(cc, TF, where="mid", color=st["tc"], lw=1.0, ls="--",
+                        label=f"fitted cells only, {lab}")
             ax.errorbar(cc, G[0], yerr=np.sqrt(G[1]), fmt=st["fmt"], ms=3.4, color=st["gc"],
                         mfc=st["mfc"], label=f"weighted LUND, {lab}")
             ok = T > 0
@@ -215,7 +264,8 @@ def main():
                 re = np.where(ok, np.sqrt(G[1] + TE ** 2) / T, np.nan)
             rx.errorbar(cc, rr, yerr=re, fmt=st["fmt"], ms=3, color=st["gc"], mfc=st["mfc"])
             pull = ((G[0] - T) / np.sqrt(G[1] + TE ** 2))[ok]
-            pulls.append(f"{lab}: rms pull {np.sqrt((pull ** 2).mean()):.2f}")
+            pulls.append(f"{lab}: rms pull {np.sqrt((pull ** 2).mean()):.2f}"
+                         + (f", {unfit:.0%} unfitted" if unfit > 1e-3 else ""))
             ax.set_xlim(edges[0], edges[-1])
         ax.set_title(title, fontsize=10); ax.set_ylabel(ylabel, fontsize=8.5)
         ax.set_ylim(0, None); ax.tick_params(labelsize=8, labelbottom=False)

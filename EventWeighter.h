@@ -2,9 +2,10 @@
 // EventWeighter.h -- accept-reject weighting for runEventGenerator.cpp
 //
 // Every weight surface the generator can apply lives here, so the
-// generator itself only has to ask two questions:
+// generator itself only has to ask three questions:
 //
 //   weighter.acceptElectron(Q2, Ep, rnd)   -- at electron-sampling time
+//   weighter.acceptPairStage1(Q2, W, rnd)  -- once the electron fixes Q2, W
 //   weighter.acceptEvent(kin, rnd)         -- once the decay chain exists
 //
 // The surfaces themselves are built OUTSIDE the generator (see reweight/)
@@ -14,14 +15,19 @@
 //   xsec_weight:       <root file> [<hist>]   TH3D w(Q2, W, M_X)    default w_Q2_W_M
 //   xsec_weight_mode:  interp | bin           (default interp)
 //   pair_weight:       <root file> <hist> <pidA> <pidB>
-//                                             TH3D w(Q2, W, M_AB), one per
-//                                             species pair, repeatable
+//                                             TH3D w(Q2, W, M_AB), or a 4-D
+//                                             THnD w(Q2, W, M_AB, -t' of the
+//                                             rest), one per species pair,
+//                                             repeatable
 //   pair_weight_mode:  interp | bin           (default interp; must match
 //                                             what build_pair_weight.py
 //                                             was run with)
+//   pair_weight_stage1: <root file> [<hist>]  TH2D A(Q2, W) from the same
+//                                             build, default w_pair_stage1
 //
 // Each is normalized so that max(w) = 1 and the event is kept with
-// probability w. To add a new weight: give WeightConfig a file/name pair
+// probability w. pair_weight_stage1 splits the pair weights' accept in two
+// (A at electron time, w / A after the decay) without changing what is kept. To add a new weight: give WeightConfig a file/name pair
 // and a parseKey branch, load it in EventWeighter::load(), and evaluate it
 // in acceptElectron() or acceptEvent() -- the generator does not change.
 //
@@ -36,6 +42,7 @@
 #include <TFile.h>
 #include <TH2D.h>
 #include <TH3D.h>
+#include <THn.h>
 #include <TRandom3.h>
 #include <TLorentzVector.h>
 
@@ -86,7 +93,10 @@ struct WeightConfig {
     // histogram is filled, so the target can be the measured pooled M(p pbar)
     // and M(p p) distributions, both symmetric under p1 <-> p2, instead of a
     // "true" M_X that would have to be unfolded from them (and can go
-    // negative). All pair surfaces go into ONE accept-reject.
+    // negative). All pair surfaces go into ONE accept-reject. A 4-D surface
+    // (THnD) adds -t' of the rest of the event -- for a (p pbar) pair the
+    // proton it leaves out, for the (p p) pair the pbar -- which is just as
+    // symmetric under p1 <-> p2 and is the t the analysis bins in.
     struct PairWeight {
         std::string file;
         std::string name;
@@ -101,6 +111,16 @@ struct WeightConfig {
     // target. interp gives a continuous w(Q2, W, M); bin imprints the grid
     // on the events as steps in Q2 and W.
     bool pair_weight_interp = true;
+    // Electron-stage factor A(Q2, W) of the pair weights, a TH2D written by
+    // build_pair_weight.py into the SAME file as the surfaces: per (Q2, W)
+    // cell, the largest product the builder's sample realizes there (times
+    // a margin, capped at 1). The pair accept is split as A, applied before
+    // anything decays, times w / A after -- the same events are kept as
+    // with w alone, but the full decay chain is only built where the cell
+    // can use it. Tied to the surfaces it was built from: it is ignored
+    // unless it comes from the file the pair_weight lines name.
+    std::string pair_stage1_file;
+    std::string pair_stage1_name = "w_pair_stage1";
 
     // Consume one `key: value(s)` line of the input card (key already
     // stripped of its trailing colon). Returns true if the key belongs to
@@ -148,6 +168,8 @@ struct WeightConfig {
                     pair_weights.push_back(pw);
                 }
             }
+        } else if (key == "pair_weight_stage1") {
+            readFileAndName(iss, pair_stage1_file, pair_stage1_name);
         } else {
             return false;
         }
@@ -180,6 +202,8 @@ struct EventKinematics {
                         // final state holds two protons and picking the
                         // one that came from X is ambiguous downstream,
                         // while here it is exact by construction.
+    double M_target = 0.93827208816;   // target mass, at rest [GeV]; -t of
+                                       // the rest of an event is taken from it
     // Final-state (pdg, 4-vector) list, for surfaces that reshape
     // particle-level variables such as the proton momenta.
     const std::vector<std::pair<int, TLorentzVector>> *final_particles = nullptr;
@@ -229,11 +253,14 @@ public:
             ps.pidA = pw.pidA;
             ps.pidB = pw.pidB;
             if (!ps.open(pw.file, pw.name, "pair_weight")) { pairs_ok = false; break; }
+            const bool four = ps.usesRestT();
             std::cout << "Pair-mass weight enabled: " << pw.file << ":" << pw.name
-                      << "  (" << (cfg_.pair_weight_interp ? "trilinear Interpolate"
-                                                           : "per-bin lookup")
-                      << " on Q2, W, M(" << pw.pidA << "," << pw.pidB
-                      << "), product over all such pairs)" << std::endl;
+                      << "  (" << (cfg_.pair_weight_interp
+                                       ? (four ? "quadrilinear" : "trilinear Interpolate")
+                                       : "per-bin lookup")
+                      << " on Q2, W, M(" << pw.pidA << "," << pw.pidB << ")"
+                      << (four ? ", -t' of the rest" : "")
+                      << ", product over all such pairs)" << std::endl;
             pairs_.push_back(std::move(ps));
         }
         if (!pairs_ok) {
@@ -242,6 +269,32 @@ public:
                       << "are disabled." << std::endl;
             for (auto &ps : pairs_) ps.close();
             pairs_.clear();
+        }
+        // The electron-stage factor holds the realized maxima of the
+        // product of THESE surfaces; with any other surfaces, or none,
+        // dividing it out would reshape the run. So it loads only next to
+        // the pair surfaces of its own file -- and without it the pair
+        // stage keeps w as before.
+        if (!cfg_.pair_stage1_file.empty()) {
+            bool same_file = false;
+            for (const auto &pw : cfg_.pair_weights) {
+                if (pw.file == cfg_.pair_stage1_file) same_file = true;
+            }
+            if (pairs_.empty()) {
+                std::cerr << "WARNING: pair_weight_stage1 without active pair_weight "
+                          << "surfaces; ignored." << std::endl;
+            } else if (!same_file) {
+                std::cerr << "ERROR: pair_weight_stage1 (" << cfg_.pair_stage1_file
+                          << ") must come from the file of the pair_weight "
+                          << "surfaces it was built for; electron stage disabled, "
+                          << "the pair stage keeps w." << std::endl;
+            } else if (stage1_.open(cfg_.pair_stage1_file, cfg_.pair_stage1_name,
+                                    "pair_weight_stage1")) {
+                std::cout << "Pair-weight electron stage enabled: "
+                          << cfg_.pair_stage1_file << ":" << cfg_.pair_stage1_name
+                          << "  (per-bin A(Q2, W) before decay; the pair stage "
+                          << "keeps w / A)" << std::endl;
+            }
         }
         if (xsec_.hist && !pairs_.empty()) {
             std::cerr << "WARNING: xsec_weight and pair_weight are both active. "
@@ -255,11 +308,14 @@ public:
     void close() {
         q2ep_.close();
         xsec_.close();
+        stage1_.close();
         for (auto &ps : pairs_) ps.close();
         pairs_.clear();
     }
 
-    bool hasElectronStage() const { return q2ep_.hist != nullptr; }
+    bool hasElectronStage() const {
+        return q2ep_.hist != nullptr || stage1_.hist != nullptr;
+    }
     bool hasEventStage()    const {
         return xsec_.hist != nullptr || !pairs_.empty();
     }
@@ -271,6 +327,19 @@ public:
     bool acceptElectron(double Q2, double Ep, TRandom3 &rnd) {
         if (!q2ep_.hist) return true;
         if (!keep(q2ep_.interpolate(Q2, Ep), rnd)) { ++n_reject_electron_; return false; }
+        return true;
+    }
+
+    // -----------------------------------------------------------------
+    // Stage 1b: the pair weights' electron-stage factor. Once the electron
+    // fixes Q2 and W -- before the intermediate mass is drawn or anything
+    // decays -- keep the event with probability A(Q2, W); acceptPairs then
+    // keeps w / A, so together they keep w. Q2 and W must be the event's
+    // own (-q^2 and the hadronic mass), the values acceptPairs is handed.
+    // -----------------------------------------------------------------
+    bool acceptPairStage1(double Q2, double W, TRandom3 &rnd) {
+        if (!stage1_.hist) return true;
+        if (!keep(stage1Factor(Q2, W), rnd)) { ++n_reject_stage1_; return false; }
         return true;
     }
 
@@ -290,6 +359,7 @@ public:
     long long nRejectElectron() const { return n_reject_electron_; }
     long long nRejectXsec()     const { return n_reject_xsec_; }
     long long nRejectPair()     const { return n_reject_pair_; }
+    long long nRejectStage1()   const { return n_reject_stage1_; }
     // Post-decay rejections only: the electron stage retries inside the
     // sampler and never costs the driver an attempt.
     long long nRejectEvent()    const {
@@ -307,6 +377,16 @@ public:
         if (q2ep_.hist) {
             os << "  (Q2, E') weight rejected " << n_reject_electron_
                << " electron proposals before decay" << std::endl;
+        }
+        if (stage1_.hist) {
+            os << "  (pair-weight electron stage rejected " << n_reject_stage1_
+               << " electrons before decay)" << std::endl;
+            if (n_stage1_over_one_ > 0) {
+                os << "  (pair weight above its (Q2, W) electron-stage factor on "
+                   << n_stage1_over_one_ << " events -- kept with A instead of w, "
+                   << "i.e. under-generated there; rebuild with a larger "
+                   << "--stage1-margin if that is not negligible)" << std::endl;
+            }
         }
     }
 
@@ -399,20 +479,54 @@ private:
         }
     };
 
-    // One pair_weight line: a 3-D surface plus the species pair it is
+    // One pair_weight line: a 3-D surface (TH3D, Q2, W, M_AB) or a 4-D one
+    // (THnD, Q2, W, M_AB, -t' of the rest) plus the species pair it is
     // evaluated on. Unlike the other surfaces, a pair mass OUTSIDE the M
     // range is not a rejection: the builder stores a pass-through factor
     // in the M under/overflow bins for every (Q2, W) column (an entry the
     // surface knows nothing about must not veto the event, whose OTHER
-    // pairing the data still counts). Q2 or W outside the grid is still
-    // outside the analysis domain -> 0. Inside, either the bin's value or
-    // trilinear interpolation between bin centers (clamped into the hull),
-    // whichever the surface was fitted for.
+    // pairing the data still counts), and along -t' too for a 4-D surface.
+    // Q2 or W outside the grid is still outside the analysis domain -> 0.
+    // Inside, either the bin's value or multilinear interpolation between
+    // bin centers (clamped into the hull), whichever the surface was
+    // fitted for.
     struct PairSurface : Surface3D {
+        THnD *hn = nullptr;   // set instead of `hist` for a 4-D surface
         int pidA = 0;
         int pidB = 0;
 
-        double lookup(double q2, double w, double m, bool interp) const {
+        // The class in the file decides the dimension: TH3D or 4-D THnD.
+        bool open(const std::string &fname, const std::string &hname,
+                  const char *label) {
+            file = TFile::Open(fname.c_str(), "READ");
+            if (!file || file->IsZombie()) {
+                std::cerr << "ERROR: cannot open " << label << " file "
+                          << fname << std::endl;
+                close();
+                return false;
+            }
+            TObject *obj = file->Get(hname.c_str());
+            hist = dynamic_cast<TH3D *>(obj);
+            hn = dynamic_cast<THnD *>(obj);
+            if (hn && hn->GetNdimensions() != 4) hn = nullptr;
+            if (!hist && !hn) {
+                std::cerr << "ERROR: no TH3D or 4-D THnD '" << hname
+                          << "' in " << fname << std::endl;
+                close();
+                return false;
+            }
+            return true;
+        }
+
+        void close() {
+            hn = nullptr;
+            Surface3D::close();
+        }
+
+        bool usesRestT() const { return hn != nullptr; }
+
+        double lookup(double q2, double w, double m, double tp, bool interp) const {
+            if (hn) return lookup4(q2, w, m, tp, interp);
             const TAxis *xa = hist->GetXaxis();
             const TAxis *ya = hist->GetYaxis();
             const TAxis *za = hist->GetZaxis();
@@ -427,7 +541,73 @@ private:
                                      clampToCenters(ya, w),
                                      clampToCenters(za, m));
         }
+
+        double lookup4(double q2, double w, double m, double tp, bool interp) const {
+            const TAxis *ax[4] = {hn->GetAxis(0), hn->GetAxis(1),
+                                  hn->GetAxis(2), hn->GetAxis(3)};
+            const double x[4] = {q2, w, m, tp};
+            if (!inRange(ax[0], q2) || !inRange(ax[1], w)) return 0.0;
+            Int_t idx[4];
+            if (!inRange(ax[2], m) || !inRange(ax[3], tp) || !interp) {
+                // FindFixBin returns 0 / nbins+1 outside the axis: the bins
+                // the pass-through factor lives in.
+                for (int d = 0; d < 4; ++d) idx[d] = ax[d]->FindFixBin(x[d]);
+                return hn->GetBinContent(hn->GetBin(idx));
+            }
+            // Multilinear between bin centers, clamped into their hull: the
+            // 4-D version of TH3::Interpolate, and the node blend
+            // build_pair_weight.py fitted (interp_nodes_nd).
+            Int_t lo[4];
+            double f[4];
+            for (int d = 0; d < 4; ++d) {
+                const int n = ax[d]->GetNbins();
+                if (n == 1) { lo[d] = 1; f[d] = 0.0; continue; }
+                const double xc = std::min(std::max(x[d], ax[d]->GetBinCenter(1)),
+                                           ax[d]->GetBinCenter(n));
+                int j = ax[d]->FindFixBin(xc);
+                if (xc < ax[d]->GetBinCenter(j)) --j;
+                j = std::min(std::max(j, 1), n - 1);
+                const double c0 = ax[d]->GetBinCenter(j), c1 = ax[d]->GetBinCenter(j + 1);
+                lo[d] = j;
+                f[d] = std::min(std::max((xc - c0) / (c1 - c0), 0.0), 1.0);
+            }
+            double sum = 0.0;
+            for (int corner = 0; corner < 16; ++corner) {
+                double lam = 1.0;
+                for (int d = 0; d < 4; ++d) {
+                    const int up = (corner >> (3 - d)) & 1;
+                    idx[d] = std::min(lo[d] + up, ax[d]->GetNbins());
+                    lam *= up ? f[d] : 1.0 - f[d];
+                }
+                if (lam > 0.0) sum += lam * hn->GetBinContent(hn->GetBin(idx));
+            }
+            return sum;
+        }
     };
+
+    // -t' of everything the (i, j) pair leaves out, the scattered electron
+    // aside -- for e p -> e' p p pbar the third hadron. With the target at
+    // rest, -t = -(P_target - p_rest)^2 = 2 m_t E_rest - m_t^2 - m_rest^2,
+    // and -t_min is that of gamma*(Q2) + target -> (pair)(M) + rest at the
+    // event's W. The same formulas as truth_ntuple.pair_entries and the
+    // analysis's cross_section._t_range.
+    static double restMinusTPrime(const EventKinematics &kin,
+                                  const std::vector<std::pair<int, TLorentzVector>> &fp,
+                                  size_t i, size_t j, double m) {
+        TLorentzVector rest;
+        for (size_t k = 0; k < fp.size(); ++k) {
+            if (k == i || k == j || fp[k].first == 11) continue;
+            rest += fp[k].second;
+        }
+        const double mt = kin.M_target, W = kin.W, Q2 = kin.Q2;
+        const double r2 = rest.M2();
+        const double minus_t = 2.0 * mt * rest.E() - mt * mt - r2;
+        const double E1 = (W * W - Q2 - mt * mt) / (2.0 * W);
+        const double p1 = std::sqrt(std::max(E1 * E1 + Q2, 0.0));
+        const double E3 = (W * W + m * m - r2) / (2.0 * W);
+        const double p3 = std::sqrt(std::max(E3 * E3 - m * m, 0.0));
+        return minus_t - (Q2 - m * m + 2.0 * E1 * E3 - 2.0 * p1 * p3);
+    }
 
     // Accept-reject on a weight normalized to max 1.
     static bool keep(double w, TRandom3 &rnd) {
@@ -448,10 +628,10 @@ private:
     // when A == B, each (A, B) combination once otherwise. The lookup mode
     // is whatever the surfaces were fitted with (pair_weight_mode); the
     // interpolation is part of the fitted model, not a smoothing applied
-    // afterwards. Since every factor is <= 1,
-    // the product is a valid accept probability as it stands. An event
-    // with no such pair at all is rejected: the surface says nothing
-    // about it.
+    // afterwards. The builder normalizes the PRODUCT's largest value on its
+    // sample to 1 (a single factor may then exceed 1), so the product is a
+    // valid accept probability as it stands. An event with no such pair at
+    // all is rejected: the surface says nothing about it.
     bool acceptPairs(const EventKinematics &kin, TRandom3 &rnd) const {
         if (!kin.final_particles) return false;
         const auto &fp = *kin.final_particles;
@@ -463,7 +643,8 @@ private:
                 for (size_t j = (ps.pidA == ps.pidB ? i + 1 : 0); j < fp.size(); ++j) {
                     if (j == i || fp[j].first != ps.pidB) continue;
                     const double m = (fp[i].second + fp[j].second).M();
-                    w *= ps.lookup(kin.Q2, kin.W, m, cfg_.pair_weight_interp);
+                    const double tp = ps.usesRestT() ? restMinusTPrime(kin, fp, i, j, m) : 0.0;
+                    w *= ps.lookup(kin.Q2, kin.W, m, tp, cfg_.pair_weight_interp);
                     if (!(w > 0.0)) return false;
                     ++n_pairs;
                 }
@@ -475,18 +656,40 @@ private:
         // sample had nothing, and is accepted outright. Counted, so it
         // cannot pass unnoticed.
         if (w > 1.0) ++n_pair_over_one_;
+        if (stage1_.hist) {
+            // acceptPairStage1 already kept this event with probability
+            // A(Q2, W); keeping w / A here makes the total w. A product above
+            // its cell's A (the builder's sample never reached it there) is
+            // kept outright, i.e. with A instead of w -- counted.
+            const double a = stage1Factor(kin.Q2, kin.W);
+            if (!(a > 0.0)) return false;   // stage 1 cannot have kept it
+            w /= a;
+            if (w > 1.0) ++n_stage1_over_one_;
+        }
         return keep(w, rnd);
+    }
+
+    // A(Q2, W): the bin the event falls in, 0 outside the grid -- where
+    // every pair surface is 0 as well, so nothing is lost there.
+    double stage1Factor(double Q2, double W) const {
+        const TAxis *xa = stage1_.hist->GetXaxis();
+        const TAxis *ya = stage1_.hist->GetYaxis();
+        if (!Surface2D::inRange(xa, Q2) || !Surface2D::inRange(ya, W)) return 0.0;
+        return stage1_.hist->GetBinContent(xa->FindFixBin(Q2), ya->FindFixBin(W));
     }
 
     WeightConfig cfg_;
     Surface2D q2ep_;   // weight_func
     Surface3D xsec_;   // xsec_weight
     std::vector<PairSurface> pairs_;   // pair_weight (one per line)
+    Surface2D stage1_;   // pair_weight_stage1
 
     long long n_reject_electron_ = 0;
     long long n_reject_xsec_     = 0;
     long long n_reject_pair_     = 0;
+    long long n_reject_stage1_   = 0;
     mutable long long n_pair_over_one_ = 0;
+    mutable long long n_stage1_over_one_ = 0;
 };
 
 #endif // EVENT_WEIGHTER_H

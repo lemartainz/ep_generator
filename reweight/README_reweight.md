@@ -661,6 +661,47 @@ Pull below 1 because the per-cell parameters follow the target's own
 fluctuations, as a per-bin ratio would. The keep fraction the builder
 predicts (`[eff]`) matched the generator's to 2%.
 
+#### Two-stage accept (`pair_weight_stage1`)
+
+The product of the surfaces is normalized to ONE global maximum, and every
+event the pair stage rejects has already been through the full decay chain.
+Normalizing each (Q2, W) cell to its own maximum instead is faster but
+wrong: it rescales the cells against each other. On the t18 surfaces the
+per-cell version delivers 0.2 to 4.2 times the right yield, cell by cell.
+
+The builder therefore also writes `A(Q2, W)` -- per (Q2, W) cell,
+`--stage1-margin` (default 1.2) times the largest event weight its sample
+realizes there, capped at 1 -- as a TH2D `w_pair_stage1` into `--out`. It
+also prints the extra card line:
+
+```
+pair_weight_stage1: ../pair_weight.root w_pair_stage1
+```
+
+The generator keeps the electron with probability `A` as soon as Q2 and W
+exist, before anything decays, and the pair stage keeps `w / A`. Together
+they keep `w`, so the output is the global-max distribution. The line is
+ignored unless it names the same file as the `pair_weight` lines.
+
+To add the table to surfaces that are already fitted, without refitting,
+pass the same `--target`, `--gen` and `--mode` plus
+`--stage1-from fitted.root --out fitted_stage1.root`.
+
+The builder prints what the table costs and saves (`[stage1]` lines):
+- the share of the accepted rate lost where `w > A`, estimated on held-out
+  halves of the sample;
+- full decay chains per kept event, before and after.
+
+The generator counts the events above their cell's `A`.
+
+Checked on `pair_weight_4d_t18.root` / `events_unweighted_t18.lund`:
+- 0.07% of the rate lost on held-out events;
+- decay chains per kept event 133 -> 29;
+- two 20k-event runs, with and without the stage, agree in Q2, W, pooled
+  M, M_pp, both -t' and the 100 (Q2, W) cells (p = 0.19-0.89);
+- 32 of 20k events above `A`;
+- wall clock 6.7 s -> 3.5 s locally.
+
 `pair_weight` replaces `xsec_weight`; do not run both, they each reshape
 the `(Q2, W)` marginal and `EventWeighter` warns if you try.
 

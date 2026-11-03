@@ -6,14 +6,14 @@ target_pid:     2212
 theta_range:    5 35
 E_range:        0 10
 Q2_range:       0 10
-t_slope:        2
+t_slope:        1.8
 u_slope:        1
 u_fraction:     0.33
 print_debug:    0
 write_lund:     0
 gen_plots:      1
 reaction:       2212, 9999: 9999, 2212, -2212
-mass_9999: BW 2. 0.4
+mass_9999: BW 2. 2
 
 # ---- Weighting (all keys below are read by EventWeighter.h, not the
 # ---- generator; see WeightConfig::parseKey) ----
@@ -50,8 +50,26 @@ mass_9999: BW 2. 0.4
 # picked as "the one from X". Use instead of xsec_weight, and always add
 # every line the builder prints: the surfaces were fitted together.
 #   Format:  pair_weight: <root file> <hist name> <pidA> <pidB>
-# pair_weight: pair_weight.root w_pair_2212_-2212 2212 -2212
-# pair_weight: pair_weight.root w_pair_2212_2212  2212  2212
+#
+# pair_weight_4d_bw22.root: the 4-D (Q2, W, M, -t') xsec4d targets, fitted
+# (--min-gen 1) on events_unweighted_bw22.lund -- THIS card with the
+# pair_weight lines off (t_slope 1.8, u_slope 1, u_fraction 0.33, BW 2. 2:
+# the wide BW covers M_X like phase space; BW 2.0 0.4 starved high M_X 3-6x).
+# The surfaces are relative to that card: change t_slope, u_*, mass_9999 or
+# the ranges and they must be rebuilt.
+# Earlier surfaces, each only valid with its own card:
+#   pair_weight_4d_t18.root  t_slope 1.8, u_fraction 0, BW 2.0 0.4
+#   pair_weight_4d_all.root  flat t, no u-channel
+pair_weight: pair_weight_4d_bw22.root w_pair_2212_-2212 2212 -2212
+pair_weight: pair_weight_4d_bw22.root w_pair_2212_2212  2212  2212
+pair_weight_mode: interp
+# Electron-stage factor A(Q2, W) for the pair weights (TH2D w_pair_stage1,
+# written by build_pair_weight.py into the SAME file as the surfaces, or added
+# to fitted surfaces with --stage1-from). The electron is kept with prob. A
+# before anything decays and the pair stage keeps w / A: the same events as
+# without it, but far fewer full decay chains are built and thrown away.
+#   Format:  pair_weight_stage1: <root file> [<hist name>]
+pair_weight_stage1: pair_weight_4d_bw22.root w_pair_stage1
 
 # Per-accepted-event truth TTree (Q2, W, M, Ep, theta_e) plus the final-state
 # 4-vectors (nfs, fs_pid[8], fs_px/py/pz/E[8]). Needed to measure the

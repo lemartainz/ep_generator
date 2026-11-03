@@ -560,6 +560,12 @@ public:
             TLorentzVector p_virtual = event.p_beam - p_scattered;
             TLorentzVector p_W       = event.p_beam + event.p_target - p_scattered;
 
+            // Pair weights' electron-stage factor A(Q2, W), on the event's own
+            // Q2 and W -- the values the pair stage divides back out.
+            if (weighter && p_W.M() >= W_min &&
+                !weighter->acceptPairStage1(-p_virtual.M2(), p_W.M(), rnd))
+                continue;
+
             if (p_W.M() >= W_min) {
                 event.v_scattered.push_back(p_scattered);
                 event.v_virtual.push_back(p_virtual);
@@ -623,6 +629,12 @@ public:
 
             TLorentzVector p_virtual = p_beam_loc - p_scattered;
             TLorentzVector p_W       = p_beam_loc + p_target_loc - p_scattered;
+
+            // Pair weights' electron-stage factor A(Q2, W), on the event's own
+            // Q2 and W -- the values acceptPairs divides back out.
+            if (weighter && p_W.M() >= W_min &&
+                !weighter->acceptPairStage1(-p_virtual.M2(), p_W.M(), rnd))
+                continue;
 
             if (p_W.M() >= W_min) {
                 p_scattered_out = p_scattered;
@@ -1110,6 +1122,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         kin.Ep  = v_scattered.E();
         kin.W   = v_W.M();
         kin.M_X = p2_lab.M();
+        kin.M_target = target_mass;
         kin.final_particles = &final_particles;
         if (!weighter.acceptEvent(kin, gen.rnd)) continue;
 

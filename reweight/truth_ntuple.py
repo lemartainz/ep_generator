@@ -113,6 +113,7 @@ def load_lund(path):
     a["Ep"] = np.where(has_e, ee, np.nan)
     a["M"] = np.full(n_ev, np.nan)
     a["theta_e"] = np.where(has_e, np.degrees(np.arctan2(np.hypot(ex, ey), ez)), np.nan)
+    a["target_mass"] = mt
     print(f"[lund] {path}: {n_ev} events ({int((~has_e).sum())} without a scattered "
           "electron)")
     return a
@@ -159,6 +160,77 @@ def pair_masses(a, pid_a, pid_b):
     ev, m = ev[order], m[order]
     per_event = np.bincount(ev, minlength=N)
     return ev, m, per_event
+
+
+def minus_t_min(Q2, W, M, m_target, m_rest2):
+    """-t_min of gamma*(Q2) + target -> (pair of mass M) + rest at CM energy W.
+
+    m_rest2 is the rest's invariant mass SQUARED. The same formula as
+    EventWeighter's PairSurface and as cross_section._t_range in the
+    analysis; NaN where the pair cannot be made.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        E1 = (W ** 2 - Q2 - m_target ** 2) / (2 * W)        # gamma* energy in the CM
+        p1 = np.sqrt(E1 ** 2 + Q2)
+        E3 = (W ** 2 + M ** 2 - m_rest2) / (2 * W)          # pair energy in the CM
+        p3 = np.sqrt(E3 ** 2 - M ** 2)
+        return Q2 - M ** 2 + 2 * E1 * E3 - 2 * p1 * p3
+
+
+def pair_entries(a, pid_a, pid_b, m_target):
+    """pair_masses, plus each entry's -t' of the REST of the event.
+
+    The rest is every final-state particle except the pair and the
+    scattered electron (pid 11) -- for e p -> e' p p pbar the third hadron:
+    the proton a (p pbar) pair leaves out, or the pbar for the (p p) pair.
+    That is the "each entry's own t" the analysis bins its acceptance in
+    (t_p1pbar = -(q - p1 - pbar)^2 is the t of p2), and it is symmetric in
+    the two protons, so the data measure exactly what is weighted here.
+
+        -t  = -(P_target - p_rest)^2 = 2 m_t E_rest - m_t^2 - m_rest^2
+        -t' = -t - (-t_min(Q2, W, M_pair))
+
+    Returns (event_index, mass, minus_t_prime, per_event), entries in the
+    same order as pair_masses.
+    """
+    n = np.asarray(a["nfs"])
+    pid = np.asarray(a["fs_pid"])
+    E, px, py, pz = (np.asarray(a[k], float) for k in ("fs_E", "fs_px", "fs_py", "fs_pz"))
+    N, cap = pid.shape
+    valid = np.arange(cap)[None, :] < n[:, None]
+    is_a = valid & (pid == pid_a)
+    is_b = valid & (pid == pid_b)
+    had = valid & (pid != 11)
+    # the hadronic total; the rest of a pair is this minus the pair
+    HE, Hx, Hy, Hz = ((v * had).sum(axis=1) for v in (E, px, py, pz))
+    Q2, W = np.asarray(a["Q2"], float), np.asarray(a["W"], float)
+
+    ev_list, m_list, tp_list = [], [], []
+    for i in range(cap):
+        j0 = i + 1 if pid_a == pid_b else 0
+        for j in range(j0, cap):
+            if j == i:
+                continue
+            sel = is_a[:, i] & is_b[:, j]
+            if not sel.any():
+                continue
+            idx = np.nonzero(sel)[0]
+            e = E[idx, i] + E[idx, j]
+            sx, sy, sz = px[idx, i] + px[idx, j], py[idx, i] + py[idx, j], pz[idx, i] + pz[idx, j]
+            m = np.sqrt(np.clip(e * e - sx ** 2 - sy ** 2 - sz ** 2, 0.0, None))
+            rE, rx, ry, rz = HE[idx] - e, Hx[idx] - sx, Hy[idx] - sy, Hz[idx] - sz
+            r2 = rE ** 2 - rx ** 2 - ry ** 2 - rz ** 2
+            mt = np.broadcast_to(m_target, (N,))[idx]
+            minus_t = 2 * mt * rE - mt ** 2 - r2
+            ev_list.append(idx)
+            m_list.append(m)
+            tp_list.append(minus_t - minus_t_min(Q2[idx], W[idx], m, mt, r2))
+    if not ev_list:
+        return (np.zeros(0, int), np.zeros(0, float), np.zeros(0, float), np.zeros(N, int))
+    ev = np.concatenate(ev_list)
+    order = np.argsort(ev, kind="stable")
+    ev, m, tp = ev[order], np.concatenate(m_list)[order], np.concatenate(tp_list)[order]
+    return ev, m, tp, np.bincount(ev, minlength=N)
 
 
 def parse_pids(spec):

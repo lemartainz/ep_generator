@@ -78,7 +78,7 @@ from matplotlib.backends.backend_pdf import PdfPages             # noqa: E402
 M_P = 0.9382720813
 
 
-def load_xsec(path, units_arg, measured=False):
+def load_xsec(path, units_arg, measured=False, dims=(3,)):
     """Load the cross section and convert it to a per-bin yield.
 
     Must match what build_xsec_weight3d.py did, or the closure compares
@@ -87,12 +87,14 @@ def load_xsec(path, units_arg, measured=False):
 
     `measured`: the target is a histogram of data (the --pair case), so it
     has statistical errors -- the npz's own if present, else Poisson. A
-    cross-section model has none.
+    cross-section model has none. `dims`: the dimensions the caller can
+    draw -- (3, 4) for a pair target with a -t' axis.
     """
     z = np.load(path, allow_pickle=True)
     edges = [np.asarray(e, dtype=float) for e in z["edges"]]
-    if len(edges) != 3:
-        raise SystemExit(f"--xsec {path}: expected 3-D, got {len(edges)}-D.")
+    if len(edges) not in dims:
+        raise SystemExit(f"--xsec {path}: expected {' or '.join(f'{d}-D' for d in dims)}, "
+                         f"got {len(edges)}-D.")
     D = np.clip(np.asarray(z["counts"], float), 0.0, None)
     if "errors" in z and np.shape(z["errors"]) == D.shape:
         E = np.abs(np.asarray(z["errors"], float))
@@ -132,8 +134,10 @@ def load_gen(path, tree, edges, pair=None):
 
 
 def load_weight_mask(path, name, shape):
-    """Boolean array of cells the weight allows (w > 0)."""
+    """Boolean array of cells the weight allows (w > 0): a TH3, or a THnD
+    for a 4-D (Q2, W, M, -t') pair surface."""
     import ROOT
+    from array import array
     if not os.path.exists(path):
         raise SystemExit(f"--weight: file not found: {path}")
     tf = ROOT.TFile(path)
@@ -141,6 +145,15 @@ def load_weight_mask(path, name, shape):
     if not h:
         tf.Close()
         raise SystemExit(f"--weight: no TH3 named '{name}' in {path}")
+    if h.InheritsFrom("THnBase"):
+        got = tuple(h.GetAxis(d).GetNbins() for d in range(h.GetNdimensions()))
+        if got != tuple(shape):
+            tf.Close()
+            raise SystemExit(f"--weight grid {got} != cross-section grid {tuple(shape)}.")
+        w = np.array([h.GetBinContent(array("i", [i + 1 for i in idx]))
+                      for idx in np.ndindex(*shape)], dtype=float).reshape(shape)
+        tf.Close()
+        return w > 0
     got = (h.GetNbinsX(), h.GetNbinsY(), h.GetNbinsZ())
     if got != shape:
         tf.Close()
@@ -157,7 +170,8 @@ def draw_closure(D, E, G, edges, live, out, *, norm="global", ncol=3,
                  ratio_range=(0.8, 1.2), tgt="cross section",
                  m_label=r"$M_{p\bar{p}}$", pair=None, title=None,
                  ynorm=False, scale=None, ydiv=None, overlay=None,
-                 panel_size=(5.2, 4.6), ratio_gap=0.22):
+                 panel_size=(5.2, 4.6), ratio_gap=0.22, x_unit="GeV",
+                 kin_edge=True):
     """Write the page-per-Q2-bin closure PDF and return the overall numbers.
 
     D, E : target per-bin yield and its error on `edges`; G the generated
@@ -178,6 +192,9 @@ def draw_closure(D, E, G, edges, live, out, *, norm="global", ncol=3,
     the page grows with the grid instead of squeezing a fixed page.
     ratio_gap: vertical gap between a spectrum and its ratio panel, as a
     fraction of the mean axes height (matplotlib's hspace).
+
+    The x axis is the third one: M by default. x_unit labels it and
+    kin_edge greys out M > W - m_p; a -t' page passes "GeV$^2$" and False.
     """
     q2e, we, me = edges
     nq, nw, nm = D.shape
@@ -267,6 +284,10 @@ def draw_closure(D, E, G, edges, live, out, *, norm="global", ncol=3,
                                + (ov["E"][iq, iw] * scale) ** 2) * yf
                 ax.errorbar(mc, np.where(lv2, pred2, np.nan), fmt="x", ms=5, lw=1.0,
                             color="#d35400", zorder=4, label=ov["label"])
+                # unfitted bins too, faint: present in the data, not delivered
+                if (~lv2 & (pred2 > 0)).any():
+                    ax.errorbar(mc, np.where(~lv2 & (pred2 > 0), pred2, np.nan), fmt="x",
+                                ms=5, lw=1.0, color="#d35400", alpha=0.3, zorder=4)
                 ax.errorbar(mc, gen2, yerr=err2, fmt="s", ms=3.4, lw=0.9, mfc="none",
                             color="#1e8449", zorder=4, alpha=0.8,
                             label="Generated, " + ov["label"])
@@ -287,7 +308,7 @@ def draw_closure(D, E, G, edges, live, out, *, norm="global", ncol=3,
             # the kinematic edge, same marking as the cross-section PDF
             m_edge_hi = we[iw + 1] - M_P
             for a in (ax, rx):
-                if m_edge_hi < me[-1]:
+                if kin_edge and m_edge_hi < me[-1]:
                     a.axvspan(max(m_edge_hi, me[0]), me[-1], color="0.85",
                               alpha=0.7, lw=0, zorder=0)
 
@@ -327,7 +348,7 @@ def draw_closure(D, E, G, edges, live, out, *, norm="global", ncol=3,
             # step = (r_hi - r_lo) / 4.0
             # rx.set_yticks([round(1.0 - step, 4), 1.0, round(1.0 + step, 4)])
             rx.set_ylabel("Ratio", fontsize=9.5, labelpad=2)
-            rx.set_xlabel(m_label + " [GeV]", fontsize=10.5, labelpad=2)
+            rx.set_xlabel(m_label + f" [{x_unit}]", fontsize=10.5, labelpad=2)
             if c == 0:
                 ax.set_ylabel("Normalized counts" if ynorm else "LUND entries / bin",
                               fontsize=10.5)
