@@ -895,8 +895,9 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
                      "M(p pbar); Mass [GeV]; Counts",
                      100, 0, 0);
     TH1D *h_int_theta = new TH1D("h_int_theta",
-                     "cos#theta^{*}_{p pbar}; cos#theta; Counts",
+                     "cos#theta^{*}_{X}, pooled p pbar - like-sign p p; cos#theta; Counts",
                      100, -1, 1);
+    h_int_theta->Sumw2();               // filled with -1 for the like-sign pairs
     TH1D *h_theta_p1_CM = new TH1D("h_theta_p1_CM",
                      "cos#theta^{*}_{p1} (faster proton, lab |p|); cos#theta; Counts",
                      100, -1, 1);
@@ -1250,19 +1251,33 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         if (!protons.empty() && !pbars.empty()) {
             double best_d = 1e99;
             double best_m = NAN;
-            TLorentzVector best_pair;
 
             for (const auto& p : protons) {
                 for (const auto& pb : pbars) {
                     double m = (p + pb).M();
                     double d = std::abs(m - mX_true);
-                    if (d < best_d) { best_d = d; best_m = m; best_pair = p + pb; }
+                    if (d < best_d) { best_d = d; best_m = m; }
                 }
             }
 
             if (std::isfinite(best_m)) {
                 h_int->Fill(best_m); // reconstructed M(X) from daughters
-                h_int_theta->Fill(cosCM(best_pair));
+            }
+        }
+
+        // X angle by the like-sign subtraction, the way the data get it: every
+        // p pbar pairing in (+1), every p p pair out (-1). For p p pbar that is
+        // one net entry per event, the scale of h_theta_X, with no choice of
+        // which proton came from X. It equals X only while the X proton and
+        // the pbar are interchangeable; the difference is the LS residual.
+        for (size_t i = 0; i < protons.size(); ++i) {
+            for (const auto& pb : pbars) {
+                const double c = cosCM(protons[i] + pb);
+                if (std::isfinite(c)) h_int_theta->Fill(c);
+            }
+            for (size_t j = i + 1; j < protons.size(); ++j) {
+                const double c = cosCM(protons[i] + protons[j]);
+                if (std::isfinite(c)) h_int_theta->Fill(c, -1.0);
             }
         }
 
@@ -1542,20 +1557,20 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         leg_p->Draw();
         // c7->SaveAs("proton_momenta.png"); // viewable even in batch (-b) mode
 
-        // cos(theta*) in the gamma* p CM: X (truth and the reconstructed pair
-        // closest to M_X), and each final-state particle by role
+        // cos(theta*) in the gamma* p CM: X (truth and the like-sign
+        // subtraction), and each final-state particle by role
         TCanvas *c8 = new TCanvas("c8", "cos(theta*) in the gamma* p CM", 1200, 500);
         c8->Divide(2, 1);
         c8->cd(1);
         h_theta_X->SetLineColor(kRed);
         h_theta_X->SetLineWidth(2);
-        h_theta_X->SetMaximum(1.1 * std::max(h_theta_X->GetMaximum(), h_int_theta->GetMaximum()));
-        h_theta_X->GetYaxis()->SetRangeUser(0, h_theta_X->GetMaximum() * 1.1);
+        h_theta_X->SetMaximum(1.21 * std::max(h_theta_X->GetMaximum(), h_int_theta->GetMaximum()));
+        h_theta_X->SetMinimum(std::min(0.0, 1.1 * h_int_theta->GetMinimum()));   // LS can go negative
         h_theta_X->Draw();
         h_int_theta->Draw("SAMEE");
         TLegend *leg_x = new TLegend(0.15, 0.72, 0.55, 0.88);
         leg_x->AddEntry(h_theta_X,   "X (truth)", "l");
-        leg_x->AddEntry(h_int_theta, "p#bar{p} closest to M_{X}", "lep");
+        leg_x->AddEntry(h_int_theta, "pooled p#bar{p} #minus like-sign pp", "lep");
         leg_x->Draw();
         c8->cd(2);
         h_theta_p1_CM->SetLineColor(kBlue);

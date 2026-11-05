@@ -13,7 +13,7 @@ print_debug:    0
 write_lund:     0
 gen_plots:      1
 reaction:       2212, 9999: 9999, 2212, -2212
-mass_9999: BW 2. 2
+mass_9999: BW 2. 0.4
 
 # ---- Weighting (all keys below are read by EventWeighter.h, not the
 # ---- generator; see WeightConfig::parseKey) ----
