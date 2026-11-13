@@ -108,6 +108,10 @@ Any lines beginning with # are ignored.
 | weight_func | Weight surface `w(Q^2, E')` applied at electron-sampling time: `<root file> [<hist name>]` (name defaults to `w_Q2_Ep`) | string |
 | xsec_weight | 3-D weight surface `w(Q^2, W, M_X)` applied as a second accept-reject after the decay chain: `<root file> [<hist name>]` (name defaults to `w_Q2_W_M`) | string |
 | xsec_weight_mode | How to read that TH3D: `interp` (default, trilinear between bin centres) or `bin` (per-bin lookup) | string |
+| dr_fraction | Probability that an event is double-Regge instead of `W -> recoil + X(-> d1 d2)` with an isotropic X decay (default 0). The X daughter `dr_top_pid` comes off the photon vertex, the recoil off the target vertex (`t_slope`, always t-channel), the other X daughter in between | float in [0, 1] |
+| dr_slope    | Slope on t1' = \|t1 - t1_max\|, t1 = (q - p_top)^2, for the particle at the photon vertex | float |
+| dr_top_pid  | Which X daughter sits at the photon vertex (default `-2212`, the pbar) | int |
+| dr_mass     | Mass of the (top + middle) pair for the double-Regge events: `<func> <val> [<width>]`, same functions as `mass_<pdg>` (default: the X spec) | string |
 | pair_weight | 3-D pair-mass weight `w(Q^2, W, M_AB)` evaluated on **every** `(A, B)` pair in the final state and multiplied together: `<root file> <hist name> <pidA> <pidB>`. Repeatable; all lines form one accept-reject | string |
 | truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e)` plus the final-state 4-vectors to this ROOT file | string |
 

@@ -194,6 +194,20 @@ struct ReadInput {
     // backward and the recoil forward. 0 = t-channel only (the old behaviour).
     double u_slope        = 0;
     double u_fraction     = 0;
+    // Double-Regge share: with probability dr_fraction an event is not
+    // W -> recoil + X(-> d1 d2) with an isotropic X decay but a double-Regge
+    // topology. The X daughter dr_top_pid (default the pbar) comes off the
+    // photon vertex, with slope dr_slope on t1' = |t1 - t1_max|,
+    // t1 = (q - p_top)^2; the recoil comes off the target vertex with t_slope
+    // as usual; the other X daughter sits in between. Generated sequentially:
+    // the (top + middle) pair mass from dr_mass (default: the X mass spec),
+    // W -> recoil + pair with t_slope, then the pair 'decay' with the top
+    // particle drawn forward along q in the pair rest frame. The DR events are
+    // always t-channel at the target vertex (u_fraction acts on the rest).
+    double dr_fraction    = 0;
+    double dr_slope       = 0;
+    int    dr_top_pid     = -2212;
+    MassSpec dr_mass;     // enabled == false -> same spec as X
     std::string reaction;
     bool print_debug      = false;
     bool write_lund       = true;
@@ -304,6 +318,26 @@ ReadInput readInputFile(const string &filename) {
                 cerr << "WARNING: u_fraction " << input.u_fraction
                      << " outside [0, 1]; clamped." << endl;
                 input.u_fraction = std::clamp(input.u_fraction, 0.0, 1.0);
+            }
+        } else if (key == "dr_fraction") {
+            iss >> input.dr_fraction;
+            if (!(input.dr_fraction >= 0.0 && input.dr_fraction <= 1.0)) {
+                cerr << "WARNING: dr_fraction " << input.dr_fraction
+                     << " outside [0, 1]; clamped." << endl;
+                input.dr_fraction = std::clamp(input.dr_fraction, 0.0, 1.0);
+            }
+        } else if (key == "dr_slope") {
+            iss >> input.dr_slope;
+        } else if (key == "dr_top_pid") {
+            iss >> input.dr_top_pid;
+        } else if (key == "dr_mass") {
+            // dr_mass: <func> <val> [<width>]   (same functions as mass_<pdg>)
+            std::string func, s_val, s_wid;
+            if (iss >> func >> s_val) {
+                double wid = (iss >> s_wid) ? std::stod(s_wid) : 0.0;
+                input.dr_mass = MassSpec{func, std::stod(s_val), wid, true};
+            } else {
+                cerr << "WARNING: dr_mass needs '<func> <val> [<width>]'" << endl;
             }
         } else if (key == "reaction") {
             // rest of the line is the reaction string
@@ -827,6 +861,42 @@ bool performDecay(const TLorentzVector& parent_lab, int parent_pdg,
 }
 
 // ---------------------------------------------------------
+// Double-Regge 'decay' of the (top + middle) pair: the daughter top_pid is
+// drawn forward along q in the pair rest frame with slope `slope` on
+// t1' = |(q - p_top)^2 - t1_max|, i.e. it is emitted at the photon vertex
+// rather than by an isotropically decaying X. Daughters are added in the
+// reaction's order, as performDecay does. t1p_out receives t1'.
+// ---------------------------------------------------------
+bool doubleReggeDecay(const TLorentzVector& pair_lab, int pair_pdg, int top_pid,
+                      double slope,
+                      const std::map<int, std::vector<int>>& decay_map,
+                      eventGenerator& gen,
+                      std::vector<std::pair<int, TLorentzVector>>& final_particles,
+                      const TLorentzVector& p_virtual_lab,
+                      double* t1p_out = nullptr)
+{
+    if (!finite4(pair_lab) || pair_lab.E() <= 0.0) return false;
+    auto it = decay_map.find(pair_pdg);
+    if (it == decay_map.end() || it->second.size() != 2) return false;
+    const std::vector<int>& d = it->second;
+    const bool top_first = (d[0] == top_pid);
+    if (!top_first && d[1] != top_pid) return false;
+    const int other_pid = top_first ? d[1] : d[0];
+
+    auto dec = gen.twoBodyDecayWeighted(pair_lab, getMass(top_pid), getMass(other_pid),
+                                        slope, p_virtual_lab);
+    if (!finite4(dec.d1_lab) || !finite4(dec.d2_lab)) return false;
+    if (dec.d1_lab.E() <= 0.0 || dec.d2_lab.E() <= 0.0) return false;
+    if (t1p_out) *t1p_out = std::abs(invariantSquare(p_virtual_lab, dec.d1_lab, false) - dec.t_max);
+
+    // d1 = top particle, d2 = the middle one
+    const TLorentzVector& first  = top_first ? dec.d1_lab : dec.d2_lab;
+    const TLorentzVector& second = top_first ? dec.d2_lab : dec.d1_lab;
+    return performDecay(first,  d[0], decay_map, gen, final_particles, p_virtual_lab, 0.0)
+        && performDecay(second, d[1], decay_map, gen, final_particles, p_virtual_lab, 0.0);
+}
+
+// ---------------------------------------------------------
 // Main event-generation driver
 // ---------------------------------------------------------
 void runEventGenerator(const std::string& lund_filename = "events.lund",
@@ -872,6 +942,10 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
                      200, 0.0, 0.0);
     TH1D *h_u   = new TH1D("h_u",
                      "|u - u_{0}| (u-channel events); |u - u_{0}| [GeV^{2}]; Counts",
+                     200, 0.0, 0.0);
+    // Double-Regge events: t1' of the particle emitted at the photon vertex
+    TH1D *h_t1  = new TH1D("h_t1",
+                     "|t_{1} - t_{1,0}| (double-Regge events, photon vertex); |t_{1} - t_{1,0}| [GeV^{2}]; Counts",
                      200, 0.0, 0.0);
     TH1D *h_Q2  = new TH1D("h_Q2",
                      "Q^{2} distribution; Q^{2} [GeV^{2}]; Counts",
@@ -977,6 +1051,20 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         cerr << "ERROR: Only two-body first decays W->d1+d2 are currently supported.\n";
         return;
     }
+    if (input.dr_fraction > 0.0) {
+        auto itX = decay_map.find(parents[1]);
+        if (itX == decay_map.end() || itX->second.size() != 2 ||
+            (itX->second[0] != input.dr_top_pid && itX->second[1] != input.dr_top_pid)) {
+            cerr << "ERROR: dr_fraction > 0 needs X (" << parents[1] << ") to decay into two "
+                 << "particles, one of them dr_top_pid = " << input.dr_top_pid << ".\n";
+            return;
+        }
+        cout << "Double-Regge share " << input.dr_fraction << ": " << input.dr_top_pid
+             << " at the photon vertex (dr_slope " << input.dr_slope << "), pair mass "
+             << (input.dr_mass.enabled ? input.dr_mass.func + " " + std::to_string(input.dr_mass.val)
+                                         + " " + std::to_string(input.dr_mass.width)
+                                       : std::string("as X")) << endl;
+    }
 
     double threshold = getFinalStateThreshold(input.reaction);
     cout << "Final-state threshold: " << threshold << " GeV\n";
@@ -997,6 +1085,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     TTree *truth_tree = nullptr;
     double nt_Q2 = 0, nt_W = 0, nt_M = 0, nt_Ep = 0, nt_theta = 0;
     int    nt_u_channel = 0;   // 1 = the event was drawn u-channel (X backward)
+    int    nt_dr = 0;          // 1 = double-Regge event (no X decay)
     // Final-state block, fixed-capacity so it reads back as plain 2-D numpy
     // arrays (uproot needs no awkward for `fs_px[8]/D`). Holds every
     // final-state particle including the scattered electron; consumers
@@ -1021,6 +1110,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             truth_tree->Branch("Ep",      &nt_Ep,    "Ep/D");
             truth_tree->Branch("theta_e", &nt_theta, "theta_e/D");
             truth_tree->Branch("u_channel", &nt_u_channel, "u_channel/I");
+            truth_tree->Branch("dr",      &nt_dr,    "dr/I");
             truth_tree->Branch("nfs",     &nt_nfs,   "nfs/I");
             truth_tree->Branch("fs_pid",  nt_fs_pid, "fs_pid[8]/I");
             truth_tree->Branch("fs_px",   nt_fs_px,  "fs_px[8]/D");
@@ -1064,9 +1154,22 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         int pdg1 = parents[0];
         int pdg2 = parents[1];
 
+        // Double-Regge event? Drawn only when dr_fraction > 0, so runs
+        // without it keep their random sequence.
+        const bool dr = input.dr_fraction > 0.0 && gen.rnd.Uniform() < input.dr_fraction;
+
         double m1 = getMass(pdg1);
         double m2 = 0.0;
-        if (!sampleIntermediateAboveThreshold(pdg2, gen.rnd, decay_map, m2)) {
+        if (dr && input.dr_mass.enabled) {
+            const double thr = parentDecayThreshold(pdg2, decay_map);
+            bool got = false;
+            for (int i = 0; i < 5000 && !got; ++i) {
+                double m = sampleMassInput(input.dr_mass.func, (float)input.dr_mass.val,
+                                           (float)input.dr_mass.width, gen.rnd);
+                if (std::isfinite(m) && m > 0.0 && m >= thr) { m2 = m; got = true; }
+            }
+            if (!got) { ++n_reject_mass; continue; }
+        } else if (!sampleIntermediateAboveThreshold(pdg2, gen.rnd, decay_map, m2)) {
             ++n_reject_mass;
             continue;
         }
@@ -1077,7 +1180,8 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         // With probability u_fraction the event is u-channel instead: the
         // slope goes on u' and X comes out backward. The random number is
         // only drawn when u_fraction > 0, so t-only runs keep their sequence.
-        const bool u_channel = input.u_fraction > 0.0 && gen.rnd.Uniform() < input.u_fraction;
+        // Double-Regge events stay t-channel at the target vertex.
+        const bool u_channel = !dr && input.u_fraction > 0.0 && gen.rnd.Uniform() < input.u_fraction;
         auto decay1 = gen.twoBodyDecayWeighted(v_W, m2, m1,
                                                u_channel ? input.u_slope : input.t_slope,
                                                v_virtual, u_channel);
@@ -1089,8 +1193,13 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         bool ok = true;
         ok &= performDecay(p1_lab, pdg1, decay_map, gen, final_particles,
                            v_virtual, 0.0);
-        ok &= performDecay(p2_lab, pdg2, decay_map, gen, final_particles,
-                           v_virtual, 0.0);
+        double t1_prime = NAN;
+        if (dr)
+            ok &= doubleReggeDecay(p2_lab, pdg2, input.dr_top_pid, input.dr_slope, decay_map,
+                                   gen, final_particles, v_virtual, &t1_prime);
+        else
+            ok &= performDecay(p2_lab, pdg2, decay_map, gen, final_particles,
+                               v_virtual, 0.0);
 
         if (!ok) { ++n_reject_decay; continue; }
 
@@ -1136,6 +1245,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
             nt_Ep    = kin.Ep;
             nt_theta = v_scattered.Theta() * TMath::RadToDeg();
             nt_u_channel = u_channel ? 1 : 0;
+            nt_dr = dr ? 1 : 0;
             nt_nfs = 0;
             for (int k = 0; k < kMaxFS; ++k) {
                 nt_fs_pid[k] = 0;
@@ -1177,6 +1287,7 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         double u_shifted = abs(t_val - decay1.t_min);
         if (!u_channel && std::isfinite(t_shifted)) h_t->Fill(t_shifted);
         if ( u_channel && std::isfinite(u_shifted)) h_u->Fill(u_shifted);
+        if (dr && std::isfinite(t1_prime)) h_t1->Fill(t1_prime);
         double Q2_val = -v_virtual.M2();
         if (std::isfinite(Q2_val)) h_Q2->Fill(Q2_val);
         double Ep_val = v_scattered.E();
@@ -1450,11 +1561,20 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     };
     verifySlope(h_t, input.t_slope, "f_exp", "t");
     if (input.u_fraction > 0.0) {
+        // of the events that are not double-Regge (those are always t-channel)
         cout << "u-channel fraction: requested " << input.u_fraction << ", generated "
              << std::setprecision(4)
-             << h_u->GetEntries() / std::max(1.0, h_t->GetEntries() + h_u->GetEntries())
+             << h_u->GetEntries() / std::max(1.0, h_t->GetEntries() + h_u->GetEntries()
+                                                  - h_t1->GetEntries())
              << endl;
         verifySlope(h_u, input.u_slope, "f_exp_u", "u");
+    }
+    if (input.dr_fraction > 0.0) {
+        cout << "double-Regge fraction: requested " << input.dr_fraction << ", generated "
+             << std::setprecision(4)
+             << h_t1->GetEntries() / std::max(1.0, h_t->GetEntries() + h_u->GetEntries())
+             << " (after any accept-reject weights)" << endl;
+        verifySlope(h_t1, input.dr_slope, "f_exp_dr", "dr");
     }
 
     if (input.gen_plots) {
