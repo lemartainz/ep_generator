@@ -1,20 +1,21 @@
-# Iteration 0 of the generation chain: ep -> e' p p pbar with no physics model,
-# a broad proposal for the acceptance and for the weight surfaces built on it.
+# Iteration 0 of the generation chain: ep -> e' p p pbar with no physics model
+# -- flat t, isotropic X decay, a very wide X mass -- the base for a fresh
+# acceptance and for the weight surfaces built on it.
 #
 #   - mass_9999: BW 2 6  is a very wide X = p pbar mass draw. A draw above
 #     W - m_p fails the decay and the electron is redrawn, so at every W the
-#     mass follows the truncated BW and W is weighted by its open M_X range:
-#     the (W, M_X) plane fills nearly evenly. The BW density relative to
-#     threshold is 0.98 / 0.90 / 0.79 at M_X 2.5 / 3.0 / 3.54 GeV.
-#     Exactly flat would be  mass_9999: uniform 2.7064 0.8298
-#     ([2 m_p, W_max - m_p] at 10.2 GeV); phase space is  mass_9999: ps.
-#   - t_slope 0 and the isotropic X decay: flat production and decay angles.
+#     mass follows the truncated BW (density 0.98 / 0.90 / 0.79 of threshold at
+#     M_X 2.5 / 3.0 / 3.54 GeV) and the (W, M_X) plane fills nearly evenly.
+#     True three-body phase space instead:  mass_9999: ps  (every event
+#     Dalitz-flat with t_slope 0); exactly flat M_X:  uniform 2.7064 0.8298.
 #   - No u-channel, no double-Regge, no weight lines. Later iterations keep
-#     THIS card as the proposal and add weight surfaces built against its
-#     truth ntuple (gen_truth_iter0.root); change anything here and the
-#     surfaces must be rebuilt.
+#     THIS card as the proposal and add pair_weight / slow_p_weight surfaces
+#     built against it; change anything here and the surfaces must be rebuilt.
 #   - W_min sits at the 3 m_p threshold (2.8148) so the first W bin of the
 #     analysis grids (from 2.819) is fully generated.
+#   - Farm:  INPUT=input_ps_iter0.txt OUTDIR=<new dir> ./submit.sh <N events>
+#     worker.sh drops the truth_ntuple line below (parallel jobs would all
+#     write one file); the LUND files are all build_pair_weight.py needs.
 num_events:     200000
 beam_energy:    10.2
 W_min:          2.815

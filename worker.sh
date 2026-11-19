@@ -16,8 +16,10 @@ cd "${SLURM_SUBMIT_DIR:?not running under slurm}" || exit 1
 echo "Working dir: $(pwd) on $(hostname)"
 
 MACRO="runEventGenerator.cpp"
-INPUT="input.txt"
+INPUT="${INPUT:-input.txt}"     # the card; submit.sh passes INPUT through (e.g. input_ps_iter0.txt)
 OUTDIR="${OUTDIR:-/volatile/clas12/leomart/Simulations/LUND_files}"
+[ -f "$INPUT" ] || { echo "ERROR: card $INPUT not found in $(pwd)" >&2; exit 1; }
+echo "Card: $INPUT"
 
 N_FILES_TOTAL="${1:?usage: worker.sh N_FILES_TOTAL FILES_PER_JOB [EVENTS_PER_FILE]}"
 FILES_PER_JOB="${2:?usage: worker.sh N_FILES_TOTAL FILES_PER_JOB [EVENTS_PER_FILE]}"
@@ -41,11 +43,13 @@ mkdir -p "$SCRATCH"
 trap 'rm -rf "$SCRATCH"' EXIT
 SET_BUILD_DIR="gSystem->SetBuildDir(\"${SCRATCH}\", kTRUE);"
 
-# Per-task card: input.txt plus overrides (the reader keeps the last value of
-# a key). The echo matters: input.txt has no trailing newline.
+# Per-task card: the input card plus overrides (the reader keeps the last value
+# of a key). The echo matters: a card may have no trailing newline. truth_ntuple
+# lines are dropped: every task would write the same file, and the LUND output
+# is all build_pair_weight.py needs as --gen.
 CARD="${SCRATCH}/input.txt"
 {
-    cat "$INPUT"
+    grep -v '^[[:space:]]*truth_ntuple' "$INPUT"
     echo
     echo "num_events: ${EVENTS_PER_FILE}"
     echo "write_lund: 1"

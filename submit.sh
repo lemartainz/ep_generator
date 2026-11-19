@@ -17,6 +17,22 @@ if ! command -v root > /dev/null; then
     exit 1
 fi
 
+# The card and output directory travel to the jobs through the environment:
+#   INPUT=input_ps_iter0.txt OUTDIR=/volatile/.../LUND_files/ps_iter0 ./submit.sh 5e7
+export INPUT="${INPUT:-input.txt}"
+export OUTDIR="${OUTDIR:-/volatile/clas12/leomart/Simulations/LUND_files}"
+if [ ! -f "$INPUT" ]; then
+    echo "ERROR: card $INPUT not found in $(pwd)" >&2
+    exit 1
+fi
+N_OLD=$(ls "$OUTDIR"/events_FD_*.dat 2>/dev/null | wc -l)
+if [ "$N_OLD" -gt 0 ]; then
+    echo "WARNING: $OUTDIR already holds $N_OLD events_FD_*.dat files; this run" \
+         "overwrites them file by file. Set OUTDIR to a new directory per iteration." >&2
+fi
+
+echo "Card:            $INPUT"
+echo "Output dir:      $OUTDIR"
 echo "Total events:    $N_EVENTS_TOTAL"
 echo "Files to generate: $N_FILES"
 echo "Jobs to submit:  $N_JOBS"
