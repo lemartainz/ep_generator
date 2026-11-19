@@ -233,6 +233,25 @@ def pair_entries(a, pid_a, pid_b, m_target):
     return ev, m, tp, np.bincount(ev, minlength=N)
 
 
+def slow_momenta(a, pid_s):
+    """|p| in the lab of the SLOWER of the pid_s particles, in every event that
+    has at least two of them -- what EventWeighter evaluates for slow_p_weight
+    (the smallest |p| of that species; with exactly two, the slower one).
+
+    Returns (event_index, p_slow, per_event) in the layout of pair_masses:
+    one entry per qualifying event; per_event 1 there and 0 elsewhere.
+    """
+    n = np.asarray(a["nfs"])
+    pid = np.asarray(a["fs_pid"])
+    px, py, pz = (np.asarray(a[k], float) for k in ("fs_px", "fs_py", "fs_pz"))
+    N, cap = pid.shape
+    sel = (pid == pid_s) & (np.arange(cap)[None, :] < n[:, None])
+    p = np.where(sel, np.sqrt(px ** 2 + py ** 2 + pz ** 2), np.inf)
+    has = sel.sum(axis=1) >= 2
+    ev = np.nonzero(has)[0]
+    return ev, p[ev].min(axis=1), has.astype(int)
+
+
 def parse_pids(spec):
     """'2212,-2212' -> (2212, -2212)."""
     try:

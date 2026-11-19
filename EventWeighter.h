@@ -24,6 +24,11 @@
 //                                             was run with)
 //   pair_weight_stage1: <root file> [<hist>]  TH2D A(Q2, W) from the same
 //                                             build, default w_pair_stage1
+//   slow_p_weight:     <root file> <hist> [<pid>]
+//                                             TH3D w(Q2, W, |p| of the slower
+//                                             <pid>, default 2212) from the same
+//                                             build, one more factor of the pair
+//                                             product
 //
 // Each is normalized so that max(w) = 1 and the event is kept with
 // probability w. pair_weight_stage1 splits the pair weights' accept in two
@@ -121,6 +126,18 @@ struct WeightConfig {
     // unless it comes from the file the pair_weight lines name.
     std::string pair_stage1_file;
     std::string pair_stage1_name = "w_pair_stage1";
+    // Slower-particle momentum factor w(Q2, W, |p_slow|): |p| in the lab of
+    // the slower of the two final-state particles of species slow_p_pid
+    // (default 2212, the slower proton). The pair surfaces fix each pair's
+    // mass and -t' but not how the two protons share the momentum transfer
+    // within an event -- (slow, fast) versus (medium, medium) -- which the
+    // proposal's t_slope otherwise decides and the slow-proton acceptance is
+    // sensitive to. Fitted JOINTLY with the pair surfaces by
+    // build_pair_weight.py --slow-target and applied as one more factor of
+    // the same product, so it must come from the pair surfaces' file.
+    std::string slow_p_file;
+    std::string slow_p_name;
+    int slow_p_pid = 2212;
 
     // Consume one `key: value(s)` line of the input card (key already
     // stripped of its trailing colon). Returns true if the key belongs to
@@ -170,6 +187,18 @@ struct WeightConfig {
             }
         } else if (key == "pair_weight_stage1") {
             readFileAndName(iss, pair_stage1_file, pair_stage1_name);
+        } else if (key == "slow_p_weight") {
+            // slow_p_weight: file.root hist_name [pid]
+            std::string f, h;
+            if (!(iss >> f >> h)) {
+                std::cerr << "WARNING: slow_p_weight needs '<file> <hist> [<pid>]'; "
+                          << "line ignored." << std::endl;
+            } else {
+                slow_p_file = f;
+                slow_p_name = h;
+                int pid;
+                if (iss >> pid) slow_p_pid = pid;
+            }
         } else {
             return false;
         }
@@ -263,12 +292,45 @@ public:
                       << ", product over all such pairs)" << std::endl;
             pairs_.push_back(std::move(ps));
         }
+        // The slower-particle factor belongs to the same joint fit: it needs
+        // the pair surfaces of its own file, and if it fails to load the
+        // pair product it was fitted with is incomplete -- drop them all.
+        if (pairs_ok && !cfg_.slow_p_file.empty()) {
+            bool same_file = false;
+            for (const auto &pw : cfg_.pair_weights) {
+                if (pw.file == cfg_.slow_p_file) same_file = true;
+            }
+            if (pairs_.empty() || !same_file) {
+                std::cerr << "ERROR: slow_p_weight (" << cfg_.slow_p_file << ") must come "
+                          << "from the file of the pair_weight surfaces it was fitted "
+                          << "with; ALL pair weights are disabled." << std::endl;
+                pairs_ok = false;
+            } else {
+                slow_.pidA = slow_.pidB = cfg_.slow_p_pid;
+                if (!slow_.open(cfg_.slow_p_file, cfg_.slow_p_name, "slow_p_weight")
+                    || slow_.usesRestT()) {
+                    if (slow_.usesRestT())
+                        std::cerr << "ERROR: slow_p_weight '" << cfg_.slow_p_name
+                                  << "' must be a TH3D (Q2, W, |p|)." << std::endl;
+                    slow_.close();
+                    pairs_ok = false;
+                } else {
+                    std::cout << "Slower-particle momentum weight enabled: "
+                              << cfg_.slow_p_file << ":" << cfg_.slow_p_name << "  ("
+                              << (cfg_.pair_weight_interp ? "trilinear Interpolate"
+                                                          : "per-bin lookup")
+                              << " on Q2, W, |p| of the slower " << cfg_.slow_p_pid
+                              << ", one more factor of the pair product)" << std::endl;
+                }
+            }
+        }
         if (!pairs_ok) {
             std::cerr << "ERROR: a pair_weight surface failed to load; the "
                       << "pair surfaces are fitted jointly, so ALL of them "
                       << "are disabled." << std::endl;
             for (auto &ps : pairs_) ps.close();
             pairs_.clear();
+            slow_.close();
         }
         // The electron-stage factor holds the realized maxima of the
         // product of THESE surfaces; with any other surfaces, or none,
@@ -309,6 +371,7 @@ public:
         q2ep_.close();
         xsec_.close();
         stage1_.close();
+        slow_.close();
         for (auto &ps : pairs_) ps.close();
         pairs_.clear();
     }
@@ -651,6 +714,24 @@ private:
             }
             if (n_pairs == 0) return false;
         }
+        // The slower-particle factor: |p| of the slower of the (at least two)
+        // particles of its species. Outside the |p| range it reads the
+        // pass-through factor in the under/overflow bins, as the pair
+        // surfaces do along M; Q2 or W outside the grid gives 0.
+        if (slow_.hist) {
+            double p1 = -1.0, p2 = -1.0;   // the two smallest |p|, p1 <= p2
+            int n = 0;
+            for (const auto &pr : fp) {
+                if (pr.first != slow_.pidA) continue;
+                const double p = pr.second.P();
+                ++n;
+                if (p1 < 0.0 || p < p1) { p2 = p1; p1 = p; }
+                else if (p2 < 0.0 || p < p2) { p2 = p; }
+            }
+            if (n < 2) return false;
+            w *= slow_.lookup(kin.Q2, kin.W, p1, 0.0, cfg_.pair_weight_interp);
+            if (!(w > 0.0)) return false;
+        }
         // The builder normalizes to the largest factor realized on ITS
         // sample; a product above 1 means this event sits where that
         // sample had nothing, and is accepted outright. Counted, so it
@@ -683,6 +764,7 @@ private:
     Surface3D xsec_;   // xsec_weight
     std::vector<PairSurface> pairs_;   // pair_weight (one per line)
     Surface2D stage1_;   // pair_weight_stage1
+    PairSurface slow_;   // slow_p_weight: a 3-D pair-style surface on |p_slow|
 
     long long n_reject_electron_ = 0;
     long long n_reject_xsec_     = 0;

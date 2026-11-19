@@ -74,6 +74,16 @@ The `+` compiles the macro (and `EventWeighter.h`, which ACLiC tracks as a
 dependency) into `runEventGenerator_cpp.so` and reuses it until either
 file changes.
 
+If the compile fails inside the macOS SDK headers (e.g. `KernelKit requires
+-fdefine_target_os_macros`, or `redefinition of 'kBitsPerByte'` from
+`rootcling`), the conda ROOT compiler is older than the default SDK. Point
+it at an older installed SDK:
+
+```bash
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX13.1.sdk \
+  root -l -b -q 'runEventGenerator.cpp+("events.lund","input.txt")'
+```
+
 ## Input File
 The generator runs entirely through an input text file. Where each non-comment line follows the format
 
@@ -105,14 +115,16 @@ Any lines beginning with # are ignored.
 
 | Key         | Description                                   | Type       |
 |-------------|-----------------------------------------------|------------|
+| mass_\<pdg\> | Mass of a placeholder particle: a number (fixed), or `fixed <val>`, `gauss <val> <width>`, `uniform <val> <halfwidth>`, `BW <val> <width>`. For the X at the first vertex also `ps`: three-body phase space at each event's W, M_X drawn from p\*(W; m_recoil, M_X) · k\*(M_X; m_d1, m_d2) on [m_d1 + m_d2, W − m_recoil]. With `t_slope 0` every event is Dalitz-flat and every pair mass follows phase space, and no electron is rejected for its X mass, so the (Q², E') proposal stays flat. Needs a two-body X decay | string |
 | weight_func | Weight surface `w(Q^2, E')` applied at electron-sampling time: `<root file> [<hist name>]` (name defaults to `w_Q2_Ep`) | string |
 | xsec_weight | 3-D weight surface `w(Q^2, W, M_X)` applied as a second accept-reject after the decay chain: `<root file> [<hist name>]` (name defaults to `w_Q2_W_M`) | string |
 | xsec_weight_mode | How to read that TH3D: `interp` (default, trilinear between bin centres) or `bin` (per-bin lookup) | string |
 | dr_fraction | Probability that an event is double-Regge instead of `W -> recoil + X(-> d1 d2)` with an isotropic X decay (default 0). The X daughter `dr_top_pid` comes off the photon vertex, the recoil off the target vertex (`t_slope`, always t-channel), the other X daughter in between | float in [0, 1] |
 | dr_slope    | Slope on t1' = \|t1 - t1_max\|, t1 = (q - p_top)^2, for the particle at the photon vertex | float |
 | dr_top_pid  | Which X daughter sits at the photon vertex (default `-2212`, the pbar) | int |
-| dr_mass     | Mass of the (top + middle) pair for the double-Regge events: `<func> <val> [<width>]`, same functions as `mass_<pdg>` (default: the X spec) | string |
+| dr_mass     | Mass of the (top + middle) pair for the double-Regge events: `<func> <val> [<width>]`, same functions as `mass_<pdg>`, or `ps` (default: the X spec) | string |
 | pair_weight | 3-D pair-mass weight `w(Q^2, W, M_AB)` evaluated on **every** `(A, B)` pair in the final state and multiplied together: `<root file> <hist name> <pidA> <pidB>`. Repeatable; all lines form one accept-reject | string |
+| slow_p_weight | Slower-particle momentum weight `w(Q^2, W, \|p\|)` on the lab \|p\| of the slower of the two `<pid>` particles (default 2212): `<root file> <hist name> [<pid>]`. One more factor of the pair-weight product, fitted jointly with the pair surfaces by `build_pair_weight.py --slow-target` and read from the same file, in the same `pair_weight_mode`. It fixes what the pair targets leave free: how the two protons share the momentum transfer, which otherwise stays whatever the proposal's `t_slope` made it | string |
 | truth_ntuple | Write a per-accepted-event truth TTree of `(Q2, W, M, Ep, theta_e)` plus the final-state 4-vectors to this ROOT file | string |
 
 All of these are built by a **separate** script and simply loaded here;

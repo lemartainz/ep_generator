@@ -148,6 +148,31 @@ M, so the generator reads it with the same per-bin lookup. --min-gen
 defaults from --target-accuracy as in build_xsec_weight3d.py. Ratio clips
 are deliberately not offered: they break the closure permanently.
 
+A slower-particle factor: --slow-target
+---------------------------------------
+The pair targets fix each pair's (Q2, W, M[, -t']) but not how the two
+protons of one event share the momentum transfer -- (slow, fast) against
+(medium, medium) -- which then stays whatever the proposal's t_slope made it,
+and the slow-proton acceptance depends on exactly that. A truth-level test
+(flat proposal -> a t_slope 1.8 truth, 4-D pair targets matched exactly) left
+the slower proton's |p| x1.7 off at 0.3-0.5 GeV; adding a target on the
+slower proton's |p| in (Q2, W) brought it within ~10% and also fixed the
+cos theta_CM edge bins the 1 GeV^2 -t' bins smear. The faster proton's |p|
+barely helps.
+
+    --slow-target 2212 S.npz [R.npz] [name]
+
+adds one more factor per event, s(Q2, W, |p| of the slower 2212), fitted
+JOINTLY with the pair surfaces (one entry per event, same chi2, same
+normalization and electron-stage table) and written as a TH3D with the
+pass-through factor in its |p| under/overflow bins. S.npz is a 3-D
+(Q2, W, |p_slow|) histogram on the pair targets' Q2 and W edges; the
+generator reads it with
+
+    slow_p_weight: <out.root> <name> 2212
+
+next to the pair_weight lines (it must come from the same file).
+
 Two-stage accept: A(Q2, W) at electron time
 -------------------------------------------
 The product is normalized to ONE global maximum, which is what keeps the
@@ -189,7 +214,7 @@ import xsec                                                         # noqa: E402
 from build_weight_func import _archive_copy                         # noqa: E402
 from build_xsec_weight3d import read_prev_th3                       # noqa: E402
 from truth_ntuple import (load_truth, pair_masses, pair_entries, parse_pids,  # noqa: E402
-                          pair_label)
+                          pair_label, slow_momenta)
 
 AXIS_NAMES = ("Q2", "W", "M", "-t'")
 M_PROTON = 0.93827208816
@@ -323,13 +348,26 @@ class Target:
     """One pair-mass target: its grid, its data, and the sample's entries."""
 
     def __init__(self, spec, gen, units_arg, min_gen, min_rec, interp=True,
-                 m_target=M_PROTON):
-        # spec = [pids, D.npz, (R.npz), (name)]
-        if len(spec) < 2:
-            raise SystemExit("--target needs at least '<pidA,pidB> <D.npz>'")
-        self.pid_a, self.pid_b = parse_pids(spec[0])
-        self.label = pair_label(self.pid_a, self.pid_b)
-        self.name = f"w_pair_{self.pid_a}_{self.pid_b}"
+                 m_target=M_PROTON, kind="pair"):
+        # spec = [pids, D.npz, (R.npz), (name)]; for kind 'slow' [pid, ...]
+        self.kind = kind
+        if kind == "slow":
+            if len(spec) < 2:
+                raise SystemExit("--slow-target needs at least '<pid> <S.npz>'")
+            try:
+                self.pid_a = self.pid_b = int(spec[0])
+            except ValueError:
+                raise SystemExit(f"--slow-target: bad pid {spec[0]!r}; expected e.g. 2212")
+            self.label = f"slower {pair_label(self.pid_a, self.pid_a).split()[0]}"
+            self.name = f"w_slowp_{self.pid_a}"
+            self.axis_names = ("Q2", "W", "|p_slow|")
+        else:
+            if len(spec) < 2:
+                raise SystemExit("--target needs at least '<pidA,pidB> <D.npz>'")
+            self.pid_a, self.pid_b = parse_pids(spec[0])
+            self.label = pair_label(self.pid_a, self.pid_b)
+            self.name = f"w_pair_{self.pid_a}_{self.pid_b}"
+            self.axis_names = AXIS_NAMES
         d_path, r_path = spec[1], None
         for tok in spec[2:]:
             if tok.endswith(".npz"):
@@ -337,7 +375,7 @@ class Target:
             else:
                 self.name = tok
 
-        tag = f"target {self.label}"
+        tag = f"{'slow-target' if kind == 'slow' else 'target'} {self.label}"
         D, E, self.edges, units = load_hist(d_path, tag, units_arg)
         self.ndim = len(self.edges)
         # A measured histogram is per-bin COUNTS (an integral); only a
@@ -364,7 +402,12 @@ class Target:
         # entries with M (or -t') outside the grid at the fixed pass-through
         # factor, Q2/W-outside entries at the fixed zero. A 4-D target's last
         # axis is -t' of the rest of the event (truth_ntuple.pair_entries).
-        if self.ndim == 4:
+        if kind == "slow":
+            if self.ndim != 3:
+                raise SystemExit(f"{tag}: the slower-particle target must be 3-D "
+                                 f"(Q2, W, |p|), got {self.ndim}-D.")
+            ev, m, per_event = slow_momenta(gen, self.pid_a)   # m is |p_slow| here
+        elif self.ndim == 4:
             ev, m, tp, per_event = pair_entries(gen, self.pid_a, self.pid_b, m_target)
         else:
             ev, m, per_event = pair_masses(gen, self.pid_a, self.pid_b)
@@ -406,7 +449,8 @@ class Target:
         print(f"[gen] {self.label}: {len(ev)} entries from {int(self.has_pair.sum())} "
               f"of {n_ev} events ({self.k} per event); {n_out_m} entries "
               f"({100.0*n_out_m/len(ev):.1f}%) have "
-              + ("M or -t'" if self.ndim == 4 else "M") + " outside the grid -> passed "
+              + ("|p|" if kind == "slow" else "M or -t'" if self.ndim == 4 else "M")
+              + " outside the grid -> passed "
               f"through unweighted; {n_out_qw} ({100.0*n_out_qw/len(ev):.1f}%) "
               "have Q2 or W outside -> event rejected")
 
@@ -701,8 +745,13 @@ def write_surfaces(targets, out):
         out_m = float(t.u[t.OUT_M])
         nx, ny, nz = u.shape
         xe, ye, ze = (_darr('d', [float(v) for v in e]) for e in t.edges)
-        title = (f"w(Q^{{2}},W,M_{{{t.label}}}) fitted for {'interp' if t.interp else 'bin'};"
-                 f"Q^{{2}} [GeV^{{2}}];W [GeV];M({t.label}) [GeV]")
+        if t.kind == "slow":
+            title = (f"w(Q^{{2}},W,|p| of the {t.label}) fitted for "
+                     f"{'interp' if t.interp else 'bin'};"
+                     f"Q^{{2}} [GeV^{{2}}];W [GeV];|p| of the {t.label} [GeV]")
+        else:
+            title = (f"w(Q^{{2}},W,M_{{{t.label}}}) fitted for {'interp' if t.interp else 'bin'};"
+                     f"Q^{{2}} [GeV^{{2}}];W [GeV];M({t.label}) [GeV]")
         h = ROOT.TH3D(t.name, title, nx, xe, ny, ye, nz, ze)
         hm = ROOT.TH3D(t.name + "_fitted", "1 = cell fitted to the target;"
                        + title.split(";", 1)[1], nx, xe, ny, ye, nz, ze)
@@ -819,6 +868,14 @@ def main():
                          "reconstructed sim of the --gen run on the same grid, "
                          "for a reco-level correction. Name defaults to "
                          "w_pair_<pidA>_<pidB>.")
+    ap.add_argument("--slow-target", action="append", nargs="+", default=[],
+                    metavar="ARG",
+                    help="'<pid> <S.npz> [<R.npz>] [<hist name>]': a 3-D "
+                         "(Q2, W, |p|) target on the |p| of the SLOWER of the two "
+                         "<pid> particles, fitted jointly with the pair targets "
+                         "as one more factor per event (on their Q2, W edges). "
+                         "Name defaults to w_slowp_<pid>; read by the generator's "
+                         "slow_p_weight line.")
     ap.add_argument("--gen", required=True,
                     help="the run to correct: its LUND file, or its truth "
                          "ntuple (.root). Unweighted for iteration 0, the "
@@ -899,6 +956,14 @@ def main():
     targets = [Target(spec, gen, args.target_units, args.min_gen, args.min_rec,
                       interp=(args.mode == "interp"), m_target=m_target)
                for spec in args.target]
+    for spec in args.slow_target:
+        st = Target(spec, gen, args.target_units, args.min_gen, args.min_rec,
+                    interp=(args.mode == "interp"), m_target=m_target, kind="slow")
+        # one (Q2, W) domain for the whole product: outside it every factor is 0
+        if any(not np.allclose(a, b) for a, b in zip(st.edges[:2], targets[0].edges[:2])):
+            raise SystemExit("--slow-target: its Q2 and W edges must be the pair "
+                             "targets' (the electron-stage table is built on them).")
+        targets.append(st)
     names = [t.name for t in targets]
     if len(set(names)) != len(names):
         raise SystemExit(f"duplicate surface names {names}; give each --target "
@@ -973,7 +1038,7 @@ def main():
         for c in top:
             ijk = np.unravel_index(c, u.shape)
             span = " ".join(f"{nm}[{e[i]:.2f},{e[i+1]:.2f}]"
-                            for nm, e, i in zip(AXIS_NAMES, t.edges, ijk))
+                            for nm, e, i in zip(t.axis_names, t.edges, ijk))
             cells.append(f"{span} u={u[ijk]:.3f} n_gen={t.G0[ijk]:.0f}")
         print(f"[norm] {t.name}: max -> 1; pass-through factor "
               f"{t.u[t.OUT_M]:.3f}; zero-fraction {float(np.mean(u <= 0)):.3f}; "
@@ -1031,7 +1096,10 @@ def print_card(targets, out, mode, stage1):
     print("\nAdd these lines to the generator's input card (all of them: the "
           "surfaces were fitted together):")
     for t in targets:
-        print(f"    pair_weight: {out} {t.name} {t.pid_a} {t.pid_b}")
+        if t.kind == "slow":
+            print(f"    slow_p_weight: {out} {t.name} {t.pid_a}")
+        else:
+            print(f"    pair_weight: {out} {t.name} {t.pid_a} {t.pid_b}")
     print(f"    pair_weight_mode: {mode}")
     if stage1:
         print(f"    pair_weight_stage1: {out} {STAGE1_NAME}")

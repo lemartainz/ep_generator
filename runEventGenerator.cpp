@@ -50,6 +50,12 @@ struct MassSpec {
 
 static std::map<int, MassSpec> customMassSpec;
 
+// "mass_<pdg>: ps" (or phasespace): the first-vertex X mass drawn from three-body
+// phase space at each event's own W -- see samplePhaseSpaceMass.
+bool isPhaseSpaceMass(const std::string& f) {
+    return f == "ps" || f == "PS" || f == "phasespace" || f == "phase_space";
+}
+
 // Custom mass overrides (for fake PDGs like 9999, 9998, etc.)
 static std::map<int,double> customMass;
 
@@ -104,6 +110,15 @@ double sampleMassInput(std::string func,
     } else if (func == "breitwigner" || func == "bw"
             || func == "BW" || func == "BreitWigner") {
         return rnd.BreitWigner(mass_val, mass_width);
+
+    } else if (isPhaseSpaceMass(func)) {
+        static bool warned = false;
+        if (!warned) {
+            cerr << "ERROR: mass function '" << func << "' needs the event's W and is only "
+                 << "defined for the X at the first vertex (and dr_mass).\n";
+            warned = true;
+        }
+        return NAN;
 
     } else {
         cerr << "WARNING: unrecognized mass sampling function '"
@@ -248,6 +263,56 @@ double twoBodyMomentum(double M, double m1, double m2) {
     return 0.5/M * sqrt(term);
 }
 
+// ---------------------------------------------------------
+// Phase-space mass for the X at the first vertex ("mass_<pdg>: ps").
+// For W -> recoil(m_r) + X(M), X -> d1 d2, three-body phase space at fixed W is
+//     dPhi_3 ~ p*(W; m_r, M) * k*(M; m_d1, m_d2) dM  x  flat decay angles,
+// so drawing M from p* k* -- with t_slope 0 and the isotropic X decay -- makes
+// every event Dalitz-flat at its own W, and every pairing's mass follows phase
+// space. M is drawn per event at that W, so no electron is rejected for want of
+// an X mass: the (Q2, E') proposal stays exactly as sampled.
+// Accept-reject on [m_d1 + m_d2, W - m_r] under the density's maximum, found on a
+// 200-point grid (+5%; the density is smooth and single-peaked, and a draw above
+// the bound is counted and reported).
+// ---------------------------------------------------------
+static long long n_ps_over_bound = 0;
+
+bool samplePhaseSpaceMass(double W, double m_recoil, int pdg_X,
+                          const std::map<int, std::vector<int>>& decay_map,
+                          TRandom3& rnd, double& m_out)
+{
+    auto it = decay_map.find(pdg_X);
+    if (it == decay_map.end() || it->second.size() != 2) {
+        static bool warned = false;
+        if (!warned) {
+            cerr << "ERROR: mass_" << pdg_X << ": ps needs X to decay to exactly two particles.\n";
+            warned = true;
+        }
+        return false;
+    }
+    const double md1 = getMass(it->second[0]), md2 = getMass(it->second[1]);
+    const double lo = md1 + md2, hi = W - m_recoil;
+    if (!(hi > lo)) return false;
+
+    auto density = [&](double M) {
+        if (M <= lo || M >= hi) return 0.0;
+        return twoBodyMomentum(W, m_recoil, M) * twoBodyMomentum(M, md1, md2);
+    };
+    double fmax = 0.0;
+    const int n_grid = 200;
+    for (int i = 1; i < n_grid; ++i) fmax = std::max(fmax, density(lo + (hi - lo) * i / n_grid));
+    if (!(fmax > 0.0)) return false;
+    fmax *= 1.05;
+
+    for (int i = 0; i < 100000; ++i) {
+        const double M = rnd.Uniform(lo, hi);
+        const double f = density(M);
+        if (f > fmax) ++n_ps_over_bound;
+        if (rnd.Uniform(0.0, fmax) < f) { m_out = M; return true; }
+    }
+    return false;
+}
+
 double invariantSquare(const TLorentzVector &a, const TLorentzVector &b, bool use_sum=false) {
     TLorentzVector d = use_sum ? (a+b) : (a-b);
     return d.M2();
@@ -332,8 +397,11 @@ ReadInput readInputFile(const string &filename) {
             iss >> input.dr_top_pid;
         } else if (key == "dr_mass") {
             // dr_mass: <func> <val> [<width>]   (same functions as mass_<pdg>)
+            //          ps                      (phase space at the event's W)
             std::string func, s_val, s_wid;
-            if (iss >> func >> s_val) {
+            if ((iss >> func) && isPhaseSpaceMass(func)) {
+                input.dr_mass = MassSpec{"ps", 0.0, 0.0, true};
+            } else if (!func.empty() && (iss >> s_val)) {
                 double wid = (iss >> s_wid) ? std::stod(s_wid) : 0.0;
                 input.dr_mass = MassSpec{func, std::stod(s_val), wid, true};
             } else {
@@ -408,6 +476,13 @@ ReadInput readInputFile(const string &filename) {
 
             // Otherwise interpret as function name
             std::string func = tok;
+
+            // ps / phasespace: no value or width, drawn at each event's W
+            if (isPhaseSpaceMass(func)) {
+                customMassSpec[pdg] = MassSpec{"ps", 0.0, 0.0, true};
+                customMass.erase(pdg);
+                continue;
+            }
 
             std::string s_val, s_wid;
             if (!(iss >> s_val)) {
@@ -1061,9 +1136,10 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
         }
         cout << "Double-Regge share " << input.dr_fraction << ": " << input.dr_top_pid
              << " at the photon vertex (dr_slope " << input.dr_slope << "), pair mass "
-             << (input.dr_mass.enabled ? input.dr_mass.func + " " + std::to_string(input.dr_mass.val)
-                                         + " " + std::to_string(input.dr_mass.width)
-                                       : std::string("as X")) << endl;
+             << (!input.dr_mass.enabled ? std::string("as X")
+                 : isPhaseSpaceMass(input.dr_mass.func) ? std::string("ps (phase space at each W)")
+                 : input.dr_mass.func + " " + std::to_string(input.dr_mass.val)
+                   + " " + std::to_string(input.dr_mass.width)) << endl;
     }
 
     double threshold = getFinalStateThreshold(input.reaction);
@@ -1133,6 +1209,18 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     const int target_events = input.num_events;
     const int progress_step = std::max(1, target_events / 10);
 
+    // X mass from three-body phase space at each event's W (mass_<pdg>: ps)
+    const bool x_mass_ps = [&] {
+        auto it = customMassSpec.find(parents[1]);
+        return it != customMassSpec.end() && it->second.enabled && isPhaseSpaceMass(it->second.func);
+    }();
+    const bool dr_mass_ps = input.dr_mass.enabled && isPhaseSpaceMass(input.dr_mass.func);
+    if (x_mass_ps)
+        cout << "X (PDG " << parents[1] << ") mass: three-body phase space at each event's W"
+             << " (with t_slope 0 the events are Dalitz-flat)" << endl;
+    if (dr_mass_ps)
+        cout << "double-Regge pair mass: three-body phase space at each event's W" << endl;
+
     cout << "Generating " << target_events << " events (with retry on rejection)..." << endl;
 
     // ---- Main generation loop: keep going until we have num_events good events ----
@@ -1160,7 +1248,12 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
 
         double m1 = getMass(pdg1);
         double m2 = 0.0;
-        if (dr && input.dr_mass.enabled) {
+        if ((dr && dr_mass_ps) || (!(dr && input.dr_mass.enabled) && x_mass_ps)) {
+            if (!samplePhaseSpaceMass(v_W.M(), m1, pdg2, decay_map, gen.rnd, m2)) {
+                ++n_reject_mass;
+                continue;
+            }
+        } else if (dr && input.dr_mass.enabled) {
             const double thr = parentDecayThreshold(pdg2, decay_map);
             bool got = false;
             for (int i = 0; i < 5000 && !got; ++i) {
@@ -1431,6 +1524,9 @@ void runEventGenerator(const std::string& lund_filename = "events.lund",
     cout << "    - intermediate mass:    " << n_reject_mass << endl;
     cout << "    - decay failures:       " << n_reject_decay << endl;
     cout << "    - final-state checks:   " << n_reject_finalcheck << endl;
+    if (x_mass_ps || dr_mass_ps)
+        cout << "  ps mass draws above the accept bound: " << n_ps_over_bound
+             << (n_ps_over_bound ? "  <-- raise the bound margin" : "  (exact)") << endl;
     weighter.printSummary(cout);
     if (n_attempts > 0) {
         cout << "  Acceptance rate:          "
